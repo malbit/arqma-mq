@@ -7,7 +7,7 @@ extern "C" {
 
 TEST_CASE("connections with curve authentication", "[curve][connect]") {
     std::string listen = "tcp://127.0.0.1:4455";
-    LokiMQ server{
+    ArqmaMQ server{
         "", "", // generate ephemeral keys
         false, // not a service node
         [](auto) { return ""; },
@@ -20,7 +20,7 @@ TEST_CASE("connections with curve authentication", "[curve][connect]") {
     server.add_request_command("public", "hello", [&](Message& m) { m.send_reply("hi"); });
     server.start();
 
-    LokiMQ client{get_logger("C» ")};
+    ArqmaMQ client{get_logger("C» ")};
     client.log_level(LogLevel::trace);
 
     client.start();
@@ -54,7 +54,7 @@ TEST_CASE("self-connection SN optimization", "[connect][self]") {
     pubkey.resize(crypto_box_PUBLICKEYBYTES);
     privkey.resize(crypto_box_SECRETKEYBYTES);
     crypto_box_keypair(reinterpret_cast<unsigned char*>(&pubkey[0]), reinterpret_cast<unsigned char*>(&privkey[0]));
-    LokiMQ sn{
+    ArqmaMQ sn{
         pubkey, privkey,
         true,
         [&](auto pk) { if (pk == pubkey) return "tcp://127.0.0.1:5544"; else return ""; },
@@ -83,7 +83,7 @@ TEST_CASE("self-connection SN optimization", "[connect][self]") {
 
 TEST_CASE("plain-text connections", "[plaintext][connect]") {
     std::string listen = "tcp://127.0.0.1:4455";
-    LokiMQ server{get_logger("S» ")};
+    ArqmaMQ server{get_logger("S» ")};
     server.log_level(LogLevel::trace);
 
     server.add_category("public", Access{AuthLevel::none});
@@ -93,7 +93,7 @@ TEST_CASE("plain-text connections", "[plaintext][connect]") {
 
     server.start();
 
-    LokiMQ client{get_logger("C» ")};
+    ArqmaMQ client{get_logger("C» ")};
     client.log_level(LogLevel::trace);
 
     client.start();

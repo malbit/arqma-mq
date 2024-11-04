@@ -1,12 +1,12 @@
 #include "common.h"
 #include <future>
-#include <lokimq/hex.h>
+#include <arqmamq/hex.h>
 
-using namespace lokimq;
+using namespace arqmamq;
 
 TEST_CASE("basic requests", "[requests]") {
     std::string listen = "tcp://127.0.0.1:5678";
-    LokiMQ server{
+    ArqmaMQ server{
         "", "", // generate ephemeral keys
         false, // not a service node
         [](auto) { return ""; },
@@ -21,7 +21,7 @@ TEST_CASE("basic requests", "[requests]") {
     });
     server.start();
 
-    LokiMQ client(
+    ArqmaMQ client(
         [](LogLevel, const char* file, int line, std::string msg) { std::cerr << file << ":" << line << " --C-- " << msg << "\n"; }
         );
     //client.log_level(LogLevel::trace);
@@ -64,7 +64,7 @@ TEST_CASE("basic requests", "[requests]") {
 
 TEST_CASE("request from server to client", "[requests]") {
     std::string listen = "tcp://127.0.0.1:5678";
-    LokiMQ server{
+    ArqmaMQ server{
         "", "", // generate ephemeral keys
         false, // not a service node
         [](auto) { return ""; },
@@ -79,7 +79,7 @@ TEST_CASE("request from server to client", "[requests]") {
     });
     server.start();
 
-    LokiMQ client(
+    ArqmaMQ client(
         [](LogLevel, const char* file, int line, std::string msg) { std::cerr << file << ":" << line << " --C-- " << msg << "\n"; }
         );
     //client.log_level(LogLevel::trace);

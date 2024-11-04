@@ -1,7 +1,7 @@
 
 add_subdirectory(Catch2)
 
-set(LMQ_TEST_SRC
+set(ARQMQ_TEST_SRC
     main.cpp
     test_batch.cpp
     test_connect.cpp
@@ -10,7 +10,7 @@ set(LMQ_TEST_SRC
     test_string_view.cpp
     )
 
-add_executable(tests ${LMQ_TEST_SRC})
+add_executable(tests ${ARQMQ_TEST_SRC})
 
 find_package(Threads)
 find_package(PkgConfig REQUIRED)

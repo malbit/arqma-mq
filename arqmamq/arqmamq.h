@@ -50,7 +50,7 @@
 #error "ZMQ >= 4.3.0 required"
 #endif
 
-namespace lokimq {
+namespace arqmamq {
 
 using namespace std::literals;
 
@@ -79,13 +79,13 @@ struct Access {
 };
 
 /// Return type of the AllowFunc: this determines whether we allow the connection at all, and if so,
-/// sets the initial authentication level and tells LokiMQ whether the other end is an active SN.
+/// sets the initial authentication level and tells ArqmaMQ whether the other end is an active SN.
 struct Allow {
     AuthLevel auth = AuthLevel::none;
     bool remote_sn = false;
 };
 
-class LokiMQ;
+class ArqmaMQ;
 
 /// Opaque data structure representing a connection which supports ==, !=, < and std::hash.  For
 /// connections to service node this is the service node pubkey (and you can pass a 32-byte string
@@ -140,37 +140,37 @@ private:
     long long id = 0;
     std::string pk;
     std::string route;
-    friend class LokiMQ;
+    friend class ArqmaMQ;
     friend struct std::hash<ConnectionID>;
     template <typename... T>
     friend bt_dict build_send(ConnectionID to, string_view cmd, const T&... opts);
     friend std::ostream& operator<<(std::ostream& o, const ConnectionID& conn);
 };
 
-} // namespace lokimq
+} // namespace arqmamq
 namespace std {
     // Need this here because we stick it in an unordered_map below.
-    template <> struct hash<lokimq::ConnectionID> {
-        size_t operator()(const lokimq::ConnectionID &c) const {
+    template <> struct hash<arqmamq::ConnectionID> {
+        size_t operator()(const arqmamq::ConnectionID &c) const {
             return c.sn() ? std::hash<std::string>{}(c.pk) :
                 std::hash<long long>{}(c.id);
         }
     };
 } // namespace std
-namespace lokimq {
+namespace arqmamq {
 
 /// Encapsulates an incoming message from a remote connection with message details plus extra
 /// info need to send a reply back through the proxy thread via the `reply()` method.  Note that
 /// this object gets reused: callbacks should use but not store any reference beyond the callback.
 class Message {
 public:
-    LokiMQ& lokimq; ///< The owning LokiMQ object
+    ArqmaMQ& arqmamq; ///< The owning ArqmaMQ object
     std::vector<string_view> data; ///< The provided command data parts, if any.
     ConnectionID conn; ///< The connection info for routing a reply; also contains the pubkey/sn status.
     std::string reply_tag; ///< If the invoked command is a request command this is the required reply tag that will be prepended by `send_reply()`.
 
     /// Constructor
-    Message(LokiMQ& lmq, ConnectionID cid) : lokimq{lmq}, conn{std::move(cid)} {}
+    Message(ArqmaMQ& arqmq, ConnectionID cid) : arqmamq{arqmq}, conn{std::move(cid)} {}
 
     // Non-copyable
     Message(const Message&) = delete;
@@ -199,7 +199,7 @@ public:
     void send_reply(Args&&... args);
 
     /// Sends a request back to whomever sent this message.  This is effectively a wrapper around
-    /// lmq.request() that takes care of setting up the recipient arguments.
+    /// arqmq.request() that takes care of setting up the recipient arguments.
     template <typename ReplyCallback, typename... Args>
     void send_request(string_view cmd, ReplyCallback&& callback, Args&&... args);
 };
@@ -233,17 +233,17 @@ static constexpr size_t MAX_COMMAND_LENGTH = 200;
 class CatHelper;
 
 /**
- * Class that handles LokiMQ listeners, connections, proxying, and workers.  An application
+ * Class that handles ArqmaMQ listeners, connections, proxying, and workers.  An application
  * typically has just one instance of this class.
  */
-class LokiMQ {
+class ArqmaMQ {
 
 private:
 
     /// The global context
     zmq::context_t context;
 
-    /// A unique id for this LokiMQ instance, assigned in a thread-safe manner during construction.
+    /// A unique id for this ArqmaMQ instance, assigned in a thread-safe manner during construction.
     const int object_id;
 
     /// The x25519 keypair of this connection.  For service nodes these are the long-run x25519 keys
@@ -263,7 +263,7 @@ private:
     bool proxy_shutting_down = false;
 
     /// Called to obtain a "command" socket that attaches to `control` to send commands to the
-    /// proxy thread from other threads.  This socket is unique per thread and LokiMQ instance.
+    /// proxy thread from other threads.  This socket is unique per thread and ArqmaMQ instance.
     zmq::socket_t& get_control_socket();
 
     /// Stores all of the sockets created in different threads via `get_control_socket`.  This is
@@ -299,7 +299,7 @@ public:
     using ReplyCallback = std::function<void(bool success, std::vector<std::string> data)>;
 
     /// Called to write a log message.  This will only be called if the `level` is >= the current
-    /// LokiMQ object log level.  It must be a raw function pointer (or a capture-less lambda) for
+    /// ArqmaMQ object log level.  It must be a raw function pointer (or a capture-less lambda) for
     /// performance reasons.  Takes four arguments: the log level of the message, the filename and
     /// line number where the log message was invoked, and the log message itself.
     using Logger = std::function<void(LogLevel level, const char* file, int line, std::string msg)>;
@@ -310,12 +310,12 @@ public:
     using ConnectFailure = std::function<void(ConnectionID, string_view)>;
 
     /// Explicitly non-copyable, non-movable because most things here aren't copyable, and a few
-    /// things aren't movable, either.  If you need to pass the LokiMQ instance around, wrap it
+    /// things aren't movable, either.  If you need to pass the ArqmaMQ instance around, wrap it
     /// in a unique_ptr or shared_ptr.
-    LokiMQ(const LokiMQ&) = delete;
-    LokiMQ& operator=(const LokiMQ&) = delete;
-    LokiMQ(LokiMQ&&) = delete;
-    LokiMQ& operator=(LokiMQ&&) = delete;
+    ArqmaMQ(const ArqmaMQ&) = delete;
+    ArqmaMQ& operator=(const ArqmaMQ&) = delete;
+    ArqmaMQ(ArqmaMQ&&) = delete;
+    ArqmaMQ& operator=(ArqmaMQ&&) = delete;
 
     /** How long to wait for handshaking to complete on external connections before timing out and
      * closing the connection.  Setting this only affects new outgoing connections. */
@@ -324,8 +324,8 @@ public:
     /** Whether to use a zmq routing ID based on the pubkey for new outgoing connections.  This is
      * normally desirable as it allows the listener to recognize that the incoming connection is a
      * reconnection from the same remote and handover routing to the new socket while closing off
-     * the (likely dead) old socket.  This, however, prevents a single LokiMQ instance from
-     * establishing multiple connections to the same listening LokiMQ, which is sometimes useful
+     * the (likely dead) old socket.  This, however, prevents a single ArqmaMQ instance from
+     * establishing multiple connections to the same listening ArqmaMQ, which is sometimes useful
      * (for example when testing), and so this option can be overridden to `false` to use completely
      * random zmq routing ids on outgoing connections (which will thus allow multiple connections).
      */
@@ -600,7 +600,7 @@ private:
     /// Runs any queued batch jobs
     void proxy_run_batch_jobs(std::queue<batch_job>& jobs, int reserved, int& active, bool reply);
 
-    /// BATCH command.  Called with a Batch<R> (see lokimq/batch.h) object pointer for the proxy to
+    /// BATCH command.  Called with a Batch<R> (see arqmamq/batch.h) object pointer for the proxy to
     /// take over and queue batch jobs.
     void proxy_batch(detail::Batch* batch);
 
@@ -726,7 +726,7 @@ private:
 
 public:
     /**
-     * LokiMQ constructor.  This constructs the object but does not start it; you will typically
+     * ArqmaMQ constructor.  This constructs the object but does not start it; you will typically
      * want to first add categories and commands, then finish startup by invoking `start()`.
      * (Categories and commands cannot be added after startup).
      *
@@ -750,7 +750,7 @@ public:
      * listening in curve25519 mode (otherwise we couldn't verify its authenticity).  Should return
      * empty for not found or if SN lookups are not supported.
      *
-     * @param allow_incoming is a callback that LokiMQ can use to determine whether an incoming
+     * @param allow_incoming is a callback that ArqmaMQ can use to determine whether an incoming
      * connection should be allowed at all and, if so, whether the connection is from a known
      * service node.  Called with the connecting IP, the remote's verified x25519 pubkey, and the 
      * called on incoming connections with the (verified) incoming connection
@@ -760,31 +760,31 @@ public:
      * @param log a function or callable object that writes a log message.  If omitted then all log
      * messages are suppressed.
      */
-    LokiMQ( std::string pubkey,
+    ArqmaMQ( std::string pubkey,
             std::string privkey,
             bool service_node,
             SNRemoteAddress sn_lookup,
             Logger logger = [](LogLevel, const char*, int, std::string) { });
 
     /**
-     * Simplified LokiMQ constructor for a simple listener without any SN connection/authentication
+     * Simplified ArqmaMQ constructor for a simple listener without any SN connection/authentication
      * capabilities.  This treats all remotes as "basic", non-service node connections for command
      * authentication purposes.
      */
-    explicit LokiMQ(Logger logger = [](LogLevel, const char*, int, std::string) { })
-        : LokiMQ("", "", false, [](auto) { return ""s; /*no peer lookups*/ }, std::move(logger)) {}
+    explicit ArqmaMQ(Logger logger = [](LogLevel, const char*, int, std::string) { })
+        : ArqmaMQ("", "", false, [](auto) { return ""s; /*no peer lookups*/ }, std::move(logger)) {}
 
     /**
      * Destructor; instructs the proxy to quit.  The proxy tells all workers to quit, waits for them
      * to quit and rejoins the threads then quits itself.  The outer thread (where the destructor is
      * running) rejoins the proxy thread.
      */
-    ~LokiMQ();
+    ~ArqmaMQ();
 
-    /// Sets the log level of the LokiMQ object.
+    /// Sets the log level of the ArqmaMQ object.
     void log_level(LogLevel level);
 
-    /// Gets the log level of the LokiMQ object.
+    /// Gets the log level of the ArqmaMQ object.
     LogLevel log_level() const;
 
     /**
@@ -864,7 +864,7 @@ public:
      * Note that some internal jobs are counted as batch jobs: in particular timers added via
      * add_timer() are scheduled as batch jobs.
      *
-     * Cannot be called after start()ing the LokiMQ instance.
+     * Cannot be called after start()ing the ArqmaMQ instance.
      */
     void set_batch_threads(int threads);
 
@@ -876,7 +876,7 @@ public:
      *
      * Defaults to one-eighth of the number of configured general threads, rounded up.
      *
-     * Cannot be changed after start()ing the LokiMQ instance.
+     * Cannot be changed after start()ing the ArqmaMQ instance.
      */
     void set_reply_threads(int threads);
 
@@ -891,7 +891,7 @@ public:
      *
      * Defaults to `std::thread::hardware_concurrency()`.
      *
-     * Cannot be called after start()ing the LokiMQ instance.
+     * Cannot be called after start()ing the ArqmaMQ instance.
      */
     void set_general_threads(int threads);
 
@@ -1014,7 +1014,7 @@ public:
 
     /**
      * Queue a message to be relayed to the given service node or remote without requiring a reply.
-     * LokiMQ will attempt to relay the message (first connecting and handshaking to the remote SN
+     * ArqmaMQ will attempt to relay the message (first connecting and handshaking to the remote SN
      * if not already connected).
      *
      * If a new connection is established it will have a relatively short (30s) idle timeout.  If
@@ -1037,13 +1037,13 @@ public:
      * Example:
      *
      *     // Send to a SN, connecting to it if we aren't already connected:
-     *     lmq.send(pubkey, "hello.world", "abc", send_option::hint("tcp://localhost:1234"), "def");
+     *     arqmq.send(pubkey, "hello.world", "abc", send_option::hint("tcp://localhost:1234"), "def");
      *
      *     // Start connecting to a remote and immediately queue a message for it
-     *     auto conn = lmq.connect_remote("tcp://127.0.0.1:1234",
+     *     auto conn = arqmq.connect_remote("tcp://127.0.0.1:1234",
      *         [](ConnectionID) { std::cout << "connected\n"; },
      *         [](ConnectionID, string_view why) { std::cout << "connection failed: " << why << \n"; });
-     *     lmq.send(conn, "hello.world", "abc", "def");
+     *     arqmq.send(conn, "hello.world", "abc", "def");
      *
      * Both of these send the command `hello.world` to the given pubkey, containing additional
      * message parts "abc" and "def".  In the first case, if not currently connected, the given
@@ -1070,7 +1070,7 @@ public:
     template <typename... T>
     void request(ConnectionID to, string_view cmd, ReplyCallback callback, const T&... opts);
 
-    /// The key pair this LokiMQ was created with; if empty keys were given during construction then
+    /// The key pair this ArqmaMQ was created with; if empty keys were given during construction then
     /// this returns the generated keys.
     const std::string& get_pubkey() const { return pubkey; }
     const std::string& get_privkey() const { return privkey; }
@@ -1078,7 +1078,7 @@ public:
     /**
      * Batches a set of jobs to be executed by workers, optionally followed by a completion function.
      *
-     * Must include lokimq/batch.h to use.
+     * Must include arqmamq/batch.h to use.
      */
     template <typename R>
     void batch(Batch<R>&& batch);
@@ -1103,32 +1103,32 @@ public:
 ///
 /// This allows simplifying:
 ///
-/// lmq.add_category("foo", ...);
-/// lmq.add_command("foo", "a", ...);
-/// lmq.add_command("foo", "b", ...);
-/// lmq.add_request_command("foo", "c", ...);
+/// arqmq.add_category("foo", ...);
+/// arqmq.add_command("foo", "a", ...);
+/// arqmq.add_command("foo", "b", ...);
+/// arqmq.add_request_command("foo", "c", ...);
 ///
 /// to:
 ///
-/// lmq.add_category("foo", ...)
+/// arqmq.add_category("foo", ...)
 ///     .add_command("a", ...)
 ///     .add_command("b", ...)
 ///     .add_request_command("b", ...)
 ///     ;
 class CatHelper {
-    LokiMQ& lmq;
+    ArqmaMQ& arqmq;
     std::string cat;
 
 public:
-    CatHelper(LokiMQ& lmq, std::string cat) : lmq{lmq}, cat{std::move(cat)} {}
+    CatHelper(ArqmaMQ& arqmq, std::string cat) : arqmq{arqmq}, cat{std::move(cat)} {}
 
-    CatHelper& add_command(std::string name, LokiMQ::CommandCallback callback) {
-        lmq.add_command(cat, std::move(name), std::move(callback));
+    CatHelper& add_command(std::string name, ArqmaMQ::CommandCallback callback) {
+        arqmq.add_command(cat, std::move(name), std::move(callback));
         return *this;
     }
 
-    CatHelper& add_request_command(std::string name, LokiMQ::CommandCallback callback) {
-        lmq.add_request_command(cat, std::move(name), std::move(callback));
+    CatHelper& add_request_command(std::string name, ArqmaMQ::CommandCallback callback) {
+        arqmq.add_request_command(cat, std::move(name), std::move(callback));
         return *this;
     }
 };
@@ -1200,7 +1200,7 @@ inline void apply_send_option(bt_list& parts, bt_dict&, string_view arg) {
 template <typename InputIt>
 void apply_send_option(bt_list& parts, bt_dict&, const send_option::data_parts_impl<InputIt> data) {
     for (auto it = data.begin; it != data.end; ++it)
-        parts.push_back(lokimq::bt_deserialize(*it));
+        parts.push_back(arqmamq::bt_deserialize(*it));
 }
 
 /// `hint` specialization: sets the hint in the control data
@@ -1247,7 +1247,7 @@ bt_dict build_send(ConnectionID to, string_view cmd, const T&... opts) {
 }
 
 template <typename... T>
-void LokiMQ::send(ConnectionID to, string_view cmd, const T&... opts) {
+void ArqmaMQ::send(ConnectionID to, string_view cmd, const T&... opts) {
     detail::send_control(get_control_socket(), "SEND",
             bt_serialize(build_send(std::move(to), cmd, opts...)));
 }
@@ -1255,7 +1255,7 @@ void LokiMQ::send(ConnectionID to, string_view cmd, const T&... opts) {
 std::string make_random_string(size_t size);
 
 template <typename... T>
-void LokiMQ::request(ConnectionID to, string_view cmd, ReplyCallback callback, const T &...opts) {
+void ArqmaMQ::request(ConnectionID to, string_view cmd, ReplyCallback callback, const T &...opts) {
     const auto reply_tag = make_random_string(15); // 15 random bytes is lots and should keep us in most stl implementations' small string optimization
     bt_dict control_data = build_send(std::move(to), cmd, reply_tag, opts...);
     control_data["request"] = true;
@@ -1266,23 +1266,23 @@ void LokiMQ::request(ConnectionID to, string_view cmd, ReplyCallback callback, c
 
 template <typename... Args>
 void Message::send_back(string_view command, Args&&... args) {
-    lokimq.send(conn, command, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
+    arqmamq.send(conn, command, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void Message::send_reply(Args&&... args) {
     assert(!reply_tag.empty());
-    lokimq.send(conn, "REPLY", reply_tag, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
+    arqmamq.send(conn, "REPLY", reply_tag, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
 }
 
 template <typename ReplyCallback, typename... Args>
 void Message::send_request(string_view cmd, ReplyCallback&& callback, Args&&... args) {
-    lokimq.request(conn, cmd, std::forward<ReplyCallback>(callback),
+    arqmamq.request(conn, cmd, std::forward<ReplyCallback>(callback),
             send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
 }
 
 template <typename... T>
-void LokiMQ::log_(LogLevel lvl, const char* file, int line, const T&... stuff) {
+void ArqmaMQ::log_(LogLevel lvl, const char* file, int line, const T&... stuff) {
     if (log_level() < lvl)
         return;
 
@@ -1297,6 +1297,6 @@ void LokiMQ::log_(LogLevel lvl, const char* file, int line, const T&... stuff) {
 
 std::ostream &operator<<(std::ostream &os, LogLevel lvl);
 
-} // namespace lokimq
+} // namespace arqmamq
 
 // vim:sw=4:et

@@ -1,4 +1,4 @@
-#include "lokimq.h"
+#include "arqmamq.h"
 #include <map>
 #include <random>
 
@@ -8,7 +8,7 @@ extern "C" {
 #include "batch.h"
 #include "hex.h"
 
-namespace lokimq {
+namespace arqmamq {
 
 constexpr char SN_ADDR_COMMAND[] = "inproc://sn-command";
 constexpr char SN_ADDR_WORKERS[] = "inproc://sn-workers";
@@ -250,7 +250,7 @@ std::ostream& operator<<(std::ostream& o, const ConnectionID& conn) {
 }
 
 
-void LokiMQ::rebuild_pollitems() {
+void ArqmaMQ::rebuild_pollitems() {
     pollitems.clear();
     add_pollitem(pollitems, command);
     add_pollitem(pollitems, workers_socket);
@@ -260,16 +260,16 @@ void LokiMQ::rebuild_pollitems() {
         add_pollitem(pollitems, s);
 }
 
-void LokiMQ::log_level(LogLevel level) {
+void ArqmaMQ::log_level(LogLevel level) {
     log_lvl.store(level, std::memory_order_relaxed);
 }
 
-LogLevel LokiMQ::log_level() const {
+LogLevel ArqmaMQ::log_level() const {
     return log_lvl.load(std::memory_order_relaxed);
 }
 
 
-CatHelper LokiMQ::add_category(std::string name, Access access_level, unsigned int reserved_threads, int max_queue) {
+CatHelper ArqmaMQ::add_category(std::string name, Access access_level, unsigned int reserved_threads, int max_queue) {
     check_not_started(proxy_thread, "add a category");
 
     if (name.size() > MAX_CATEGORY_LENGTH)
@@ -287,7 +287,7 @@ CatHelper LokiMQ::add_category(std::string name, Access access_level, unsigned i
     return ret;
 }
 
-void LokiMQ::add_command(const std::string& category, std::string name, CommandCallback callback) {
+void ArqmaMQ::add_command(const std::string& category, std::string name, CommandCallback callback) {
     check_not_started(proxy_thread, "add a command");
 
     if (name.size() > MAX_COMMAND_LENGTH)
@@ -306,12 +306,12 @@ void LokiMQ::add_command(const std::string& category, std::string name, CommandC
         throw std::runtime_error("Cannot add command `" + fullname + "': that command already exists");
 }
 
-void LokiMQ::add_request_command(const std::string& category, std::string name, CommandCallback callback) {
+void ArqmaMQ::add_request_command(const std::string& category, std::string name, CommandCallback callback) {
     add_command(category, name, std::move(callback));
     categories.at(category).commands.at(name).second = true;
 }
 
-void LokiMQ::add_command_alias(std::string from, std::string to) {
+void ArqmaMQ::add_command_alias(std::string from, std::string to) {
     check_not_started(proxy_thread, "add a command alias");
 
     if (from.empty())
@@ -346,14 +346,14 @@ std::mutex control_sockets_mutex;
 /// Accesses a thread-local command socket connected to the proxy's command socket used to issue
 /// commands in a thread-safe manner.  A mutex is only required here the first time a thread
 /// accesses the control socket.
-zmq::socket_t& LokiMQ::get_control_socket() {
+zmq::socket_t& ArqmaMQ::get_control_socket() {
     assert(proxy_thread.joinable());
 
-    // Maps the LokiMQ unique ID to a local thread command socket.
+    // Maps the ArqmaMQ unique ID to a local thread command socket.
     static thread_local std::map<int, std::shared_ptr<zmq::socket_t>> control_sockets;
     static thread_local std::pair<int, std::shared_ptr<zmq::socket_t>> last{-1, nullptr};
 
-    // Optimize by caching the last value; LokiMQ is often a singleton and in that case we're
+    // Optimize by caching the last value; ArqmaMQ is often a singleton and in that case we're
     // going to *always* hit this optimization.  Even if it isn't, we're probably likely to need the
     // same control socket from the same thread multiple times sequentially so this may still help.
     if (object_id == last.first)
@@ -367,7 +367,7 @@ zmq::socket_t& LokiMQ::get_control_socket() {
 
     std::lock_guard<std::mutex> lock{control_sockets_mutex};
     if (proxy_shutting_down)
-        throw std::runtime_error("Unable to obtain LokiMQ control socket: proxy thread is shutting down");
+        throw std::runtime_error("Unable to obtain ArqmaMQ control socket: proxy thread is shutting down");
     auto control = std::make_shared<zmq::socket_t>(context, zmq::socket_type::dealer);
     control->setsockopt<int>(ZMQ_LINGER, 0);
     control->connect(SN_ADDR_COMMAND);
@@ -379,7 +379,7 @@ zmq::socket_t& LokiMQ::get_control_socket() {
 }
 
 
-LokiMQ::LokiMQ(
+ArqmaMQ::ArqmaMQ(
         std::string pubkey_,
         std::string privkey_,
         bool service_node,
@@ -389,14 +389,14 @@ LokiMQ::LokiMQ(
         sn_lookup{std::move(lookup)}, logger{std::move(logger)}
 {
 
-    LMQ_TRACE("Constructing listening LokiMQ, id=", object_id, ", this=", this);
+    LMQ_TRACE("Constructing listening ArqmaMQ, id=", object_id, ", this=", this);
 
     if (pubkey.empty() != privkey.empty()) {
-        throw std::invalid_argument("LokiMQ construction failed: one (and only one) of pubkey/privkey is empty. Both must be specified, or both empty to generate a key.");
+        throw std::invalid_argument("ArqmaMQ construction failed: one (and only one) of pubkey/privkey is empty. Both must be specified, or both empty to generate a key.");
     } else if (pubkey.empty()) {
         if (service_node)
-            throw std::invalid_argument("Cannot construct a service node mode LokiMQ without a keypair");
-        LMQ_LOG(debug, "generating x25519 keypair for remote-only LokiMQ instance");
+            throw std::invalid_argument("Cannot construct a service node mode ArqmaMQ without a keypair");
+        LMQ_LOG(debug, "generating x25519 keypair for remote-only ArqmaMQ instance");
         pubkey.resize(crypto_box_PUBLICKEYBYTES);
         privkey.resize(crypto_box_SECRETKEYBYTES);
         crypto_box_keypair(reinterpret_cast<unsigned char*>(&pubkey[0]), reinterpret_cast<unsigned char*>(&privkey[0]));
@@ -411,11 +411,11 @@ LokiMQ::LokiMQ(
         std::string verify_pubkey(crypto_box_PUBLICKEYBYTES, 0);
         crypto_scalarmult_base(reinterpret_cast<unsigned char*>(&verify_pubkey[0]), reinterpret_cast<unsigned char*>(&privkey[0]));
         if (verify_pubkey != pubkey)
-            throw std::invalid_argument("Invalid pubkey/privkey values given to LokiMQ construction: pubkey verification failed");
+            throw std::invalid_argument("Invalid pubkey/privkey values given to ArqmaMQ construction: pubkey verification failed");
     }
 }
 
-void LokiMQ::start() {
+void ArqmaMQ::start() {
     if (proxy_thread.joinable())
         throw std::logic_error("Cannot call start() multiple times!");
 
@@ -425,13 +425,13 @@ void LokiMQ::start() {
     if (bind.empty() && local_service_node)
         throw std::invalid_argument{"Cannot create a service node listener with no address(es) to bind"};
 
-    LMQ_LOG(info, "Initializing LokiMQ ", bind.empty() ? "remote-only" : "listener", " with pubkey ", to_hex(pubkey));
+    LMQ_LOG(info, "Initializing ArqmaMQ ", bind.empty() ? "remote-only" : "listener", " with pubkey ", to_hex(pubkey));
 
     // We bind `command` here so that the `get_control_socket()` below is always connecting to a
     // bound socket, but we do nothing else here: the proxy thread is responsible for everything
     // except binding it.
     command.bind(SN_ADDR_COMMAND);
-    proxy_thread = std::thread{&LokiMQ::proxy_loop, this};
+    proxy_thread = std::thread{&ArqmaMQ::proxy_loop, this};
 
     LMQ_LOG(debug, "Waiting for proxy thread to get ready...");
     auto &control = get_control_socket();
@@ -441,7 +441,7 @@ void LokiMQ::start() {
     zmq::message_t ready_msg;
     std::vector<zmq::message_t> parts;
     try { recv_message_parts(control, parts); }
-    catch (const zmq::error_t &e) { throw std::runtime_error("Failure reading from LokiMQ::Proxy thread: "s + e.what()); }
+    catch (const zmq::error_t &e) { throw std::runtime_error("Failure reading from ArqmaMQ::Proxy thread: "s + e.what()); }
 
     if (!(parts.size() == 1 && view(parts.front()) == "READY"))
         throw std::runtime_error("Invalid startup message from proxy thread (didn't get expected READY message)");
@@ -449,7 +449,7 @@ void LokiMQ::start() {
 }
 
 
-void LokiMQ::worker_thread(unsigned int index) {
+void ArqmaMQ::worker_thread(unsigned int index) {
     std::string worker_id = "w" + std::to_string(index);
     zmq::socket_t sock{context, zmq::socket_type::dealer};
     sock.setsockopt(ZMQ_ROUTING_ID, worker_id.data(), worker_id.size());
@@ -534,7 +534,7 @@ void LokiMQ::worker_thread(unsigned int index) {
     }
 }
 
-void LokiMQ::proxy_quit() {
+void ArqmaMQ::proxy_quit() {
     LMQ_LOG(debug, "Received quit command, shutting down proxy thread");
 
     assert(std::none_of(workers.begin(), workers.end(), [](auto& worker) { return worker.worker_thread.joinable(); }));
@@ -557,7 +557,7 @@ void LokiMQ::proxy_quit() {
     LMQ_LOG(debug, "Proxy thread teardown complete");
 }
 
-void LokiMQ::setup_outgoing_socket(zmq::socket_t& socket, string_view remote_pubkey) {
+void ArqmaMQ::setup_outgoing_socket(zmq::socket_t& socket, string_view remote_pubkey) {
     if (!remote_pubkey.empty()) {
         socket.setsockopt(ZMQ_CURVE_SERVERKEY, remote_pubkey.data(), remote_pubkey.size());
         socket.setsockopt(ZMQ_CURVE_PUBLICKEY, pubkey.data(), pubkey.size());
@@ -576,7 +576,7 @@ void LokiMQ::setup_outgoing_socket(zmq::socket_t& socket, string_view remote_pub
 }
 
 std::pair<zmq::socket_t *, std::string>
-LokiMQ::proxy_connect_sn(string_view remote, string_view connect_hint, bool optional, bool incoming_only, std::chrono::milliseconds keep_alive) {
+ArqmaMQ::proxy_connect_sn(string_view remote, string_view connect_hint, bool optional, bool incoming_only, std::chrono::milliseconds keep_alive) {
     ConnectionID remote_cid{remote};
     auto its = peers.equal_range(remote_cid);
     peer_info* peer = nullptr;
@@ -641,7 +641,7 @@ LokiMQ::proxy_connect_sn(string_view remote, string_view connect_hint, bool opti
     return {&connections.back(), ""s};
 }
 
-std::pair<zmq::socket_t *, std::string> LokiMQ::proxy_connect_sn(bt_dict_consumer data) {
+std::pair<zmq::socket_t *, std::string> ArqmaMQ::proxy_connect_sn(bt_dict_consumer data) {
     string_view hint, remote_pk;
     std::chrono::milliseconds keep_alive;
     bool optional = false, incoming_only = false;
@@ -662,7 +662,7 @@ std::pair<zmq::socket_t *, std::string> LokiMQ::proxy_connect_sn(bt_dict_consume
     return proxy_connect_sn(remote_pk, hint, optional, incoming_only, keep_alive);
 }
 
-void LokiMQ::proxy_send(bt_dict_consumer data) {
+void ArqmaMQ::proxy_send(bt_dict_consumer data) {
     bt_dict_consumer orig_data = data;
 
     // NB: bt_dict_consumer goes in alphabetical order
@@ -783,7 +783,7 @@ void LokiMQ::proxy_send(bt_dict_consumer data) {
     }
 }
 
-void LokiMQ::proxy_reply(bt_dict_consumer data) {
+void ArqmaMQ::proxy_reply(bt_dict_consumer data) {
     bool have_conn_id = false;
     ConnectionID conn_id{0};
     if (data.skip_until("conn_id")) {
@@ -829,7 +829,7 @@ void LokiMQ::proxy_reply(bt_dict_consumer data) {
     }
 }
 
-void LokiMQ::proxy_batch(detail::Batch* batch) {
+void ArqmaMQ::proxy_batch(detail::Batch* batch) {
     batches.insert(batch);
     const int jobs = batch->size();
     for (int i = 0; i < jobs; i++)
@@ -837,7 +837,7 @@ void LokiMQ::proxy_batch(detail::Batch* batch) {
     proxy_skip_one_poll = true;
 }
 
-void LokiMQ::proxy_schedule_reply_job(std::function<void()> f) {
+void ArqmaMQ::proxy_schedule_reply_job(std::function<void()> f) {
     auto* b = new Batch<void>;
     b->add_job(std::move(f));
     batches.insert(b);
@@ -847,20 +847,20 @@ void LokiMQ::proxy_schedule_reply_job(std::function<void()> f) {
 
 // Called either within the proxy thread, or before the proxy thread has been created; actually adds
 // the timer.  If the timer object hasn't been set up yet it gets set up here.
-void LokiMQ::proxy_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch) {
+void ArqmaMQ::proxy_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch) {
     if (!timers)
         timers.reset(zmq_timers_new());
 
     int timer_id = zmq_timers_add(timers.get(),
             interval.count(),
-            [](int timer_id, void* self) { static_cast<LokiMQ*>(self)->_queue_timer_job(timer_id); },
+            [](int timer_id, void* self) { static_cast<ArqmaMQ*>(self)->_queue_timer_job(timer_id); },
             this);
     if (timer_id == -1)
         throw zmq::error_t{};
     timer_jobs[timer_id] = std::make_tuple(std::move(job), squelch, false);
 }
 
-void LokiMQ::proxy_timer(bt_list_consumer timer_data) {
+void ArqmaMQ::proxy_timer(bt_list_consumer timer_data) {
     std::unique_ptr<std::function<void()>> func{reinterpret_cast<std::function<void()>*>(timer_data.consume_integer<uintptr_t>())};
     auto interval = std::chrono::milliseconds{timer_data.consume_integer<uint64_t>()};
     auto squelch = timer_data.consume_integer<bool>();
@@ -869,7 +869,7 @@ void LokiMQ::proxy_timer(bt_list_consumer timer_data) {
     proxy_timer(std::move(*func), interval, squelch);
 }
 
-void LokiMQ::proxy_control_message(std::vector<zmq::message_t>& parts) {
+void ArqmaMQ::proxy_control_message(std::vector<zmq::message_t>& parts) {
     if (parts.size() < 2)
         throw std::logic_error("Expected 2-3 message parts for a proxy control message");
     auto route = view(parts[0]), cmd = view(parts[1]);
@@ -930,7 +930,7 @@ void update_connection_indices(Container& c, size_t index, AccessIndex get_index
     }
 }
 
-void LokiMQ::proxy_close_connection(size_t index, std::chrono::milliseconds linger) {
+void ArqmaMQ::proxy_close_connection(size_t index, std::chrono::milliseconds linger) {
     connections[index].setsockopt<int>(ZMQ_LINGER, linger > 0ms ? linger.count() : 0);
     pollitems_stale = true;
     connections.erase(connections.begin() + index);
@@ -948,7 +948,7 @@ void LokiMQ::proxy_close_connection(size_t index, std::chrono::milliseconds ling
     conn_index_to_id.erase(conn_index_to_id.begin() + index);
 }
 
-void LokiMQ::proxy_expire_idle_peers() {
+void ArqmaMQ::proxy_expire_idle_peers() {
     for (auto it = peers.begin(); it != peers.end(); ) {
         auto &info = it->second;
         if (info.outgoing()) {
@@ -966,7 +966,7 @@ void LokiMQ::proxy_expire_idle_peers() {
     }
 }
 
-void LokiMQ::proxy_conn_cleanup() {
+void ArqmaMQ::proxy_conn_cleanup() {
     LMQ_TRACE("starting proxy connections cleanup");
 
     // Drop idle connections (if we haven't done it in a while) but *only* if we have some idle
@@ -1010,7 +1010,7 @@ void LokiMQ::proxy_conn_cleanup() {
     LMQ_TRACE("done proxy connections cleanup");
 };
 
-void LokiMQ::listen_curve(std::string bind_addr, AllowFunc allow_connection) {
+void ArqmaMQ::listen_curve(std::string bind_addr, AllowFunc allow_connection) {
     // TODO: there's no particular reason we can't start listening after starting up; just needs to
     // be implemented.  (But if we can start we'll probably also want to be able to stop, so it's
     // more than just binding that needs implementing).
@@ -1019,14 +1019,14 @@ void LokiMQ::listen_curve(std::string bind_addr, AllowFunc allow_connection) {
     bind.emplace_back(std::move(bind_addr), bind_data{true, std::move(allow_connection)});
 }
 
-void LokiMQ::listen_plain(std::string bind_addr, AllowFunc allow_connection) {
+void ArqmaMQ::listen_plain(std::string bind_addr, AllowFunc allow_connection) {
     // TODO: As above.
     check_not_started(proxy_thread, "start listening");
 
     bind.emplace_back(std::move(bind_addr), bind_data{false, std::move(allow_connection)});
 }
 
-void LokiMQ::proxy_loop() {
+void ArqmaMQ::proxy_loop() {
 
     zap_auth.setsockopt<int>(ZMQ_LINGER, 0);
     zap_auth.bind(ZMQ_ADDR_ZAP);
@@ -1076,7 +1076,7 @@ void LokiMQ::proxy_loop() {
         listener.setsockopt<int>(ZMQ_ROUTER_MANDATORY, 1);
 
         listener.bind(bind[i].first);
-        LMQ_LOG(info, "LokiMQ listening on ", bind[i].first);
+        LMQ_LOG(info, "ArqmaMQ listening on ", bind[i].first);
 
         connections.push_back(std::move(listener));
         auto conn_id = next_conn_id++;
@@ -1192,7 +1192,7 @@ void LokiMQ::proxy_loop() {
     }
 }
 
-std::pair<LokiMQ::category*, const std::pair<LokiMQ::CommandCallback, bool>*> LokiMQ::get_command(std::string& command) {
+std::pair<ArqmaMQ::category*, const std::pair<ArqmaMQ::CommandCallback, bool>*> ArqmaMQ::get_command(std::string& command) {
     if (command.size() > MAX_CATEGORY_LENGTH + 1 + MAX_COMMAND_LENGTH) {
         LMQ_LOG(warn, "Invalid command '", command, "': command too long");
         return {};
@@ -1229,7 +1229,7 @@ std::pair<LokiMQ::category*, const std::pair<LokiMQ::CommandCallback, bool>*> Lo
 }
 
 
-void LokiMQ::proxy_worker_message(std::vector<zmq::message_t>& parts) {
+void ArqmaMQ::proxy_worker_message(std::vector<zmq::message_t>& parts) {
     // Process messages sent by workers
     if (parts.size() != 2) {
         LMQ_LOG(error, "Received send invalid ", parts.size(), "-part message");
@@ -1304,7 +1304,7 @@ void LokiMQ::proxy_worker_message(std::vector<zmq::message_t>& parts) {
 
 // Return true if we recognized/handled the builtin command (even if we reject it for whatever
 // reason)
-bool LokiMQ::proxy_handle_builtin(size_t conn_index, std::vector<zmq::message_t>& parts) {
+bool ArqmaMQ::proxy_handle_builtin(size_t conn_index, std::vector<zmq::message_t>& parts) {
     bool outgoing = connections[conn_index].getsockopt<int>(ZMQ_TYPE) == ZMQ_DEALER;
 
     string_view route, cmd;
@@ -1398,7 +1398,7 @@ bool LokiMQ::proxy_handle_builtin(size_t conn_index, std::vector<zmq::message_t>
     return false;
 }
 
-LokiMQ::run_info& LokiMQ::get_idle_worker() {
+ArqmaMQ::run_info& ArqmaMQ::get_idle_worker() {
     if (idle_workers.empty()) {
         size_t id = workers.size();
         assert(workers.capacity() > id);
@@ -1413,7 +1413,7 @@ LokiMQ::run_info& LokiMQ::get_idle_worker() {
     return workers[id];
 }
 
-void LokiMQ::set_batch_threads(int threads) {
+void ArqmaMQ::set_batch_threads(int threads) {
     if (proxy_thread.joinable())
         throw std::logic_error("Cannot change reserved batch threads after calling `start()`");
     if (threads < -1) // -1 is the default which is based on general threads
@@ -1421,7 +1421,7 @@ void LokiMQ::set_batch_threads(int threads) {
     batch_jobs_reserved = threads;
 }
 
-void LokiMQ::set_reply_threads(int threads) {
+void ArqmaMQ::set_reply_threads(int threads) {
     if (proxy_thread.joinable())
         throw std::logic_error("Cannot change reserved reply threads after calling `start()`");
     if (threads < -1) // -1 is the default which is based on general threads
@@ -1429,7 +1429,7 @@ void LokiMQ::set_reply_threads(int threads) {
     reply_jobs_reserved = threads;
 }
 
-void LokiMQ::set_general_threads(int threads) {
+void ArqmaMQ::set_general_threads(int threads) {
     if (proxy_thread.joinable())
         throw std::logic_error("Cannot change general thread count after calling `start()`");
     if (threads < 1)
@@ -1437,7 +1437,7 @@ void LokiMQ::set_general_threads(int threads) {
     general_workers = threads;
 }
 
-LokiMQ::run_info& LokiMQ::run_info::load(category* cat_, std::string command_, ConnectionID conn_,
+ArqmaMQ::run_info& ArqmaMQ::run_info::load(category* cat_, std::string command_, ConnectionID conn_,
                 std::vector<zmq::message_t> data_parts_, const std::pair<CommandCallback, bool>* callback_) {
     is_batch_job = false;
     is_reply_job = false;
@@ -1449,12 +1449,12 @@ LokiMQ::run_info& LokiMQ::run_info::load(category* cat_, std::string command_, C
     return *this;
 }
 
-LokiMQ::run_info& LokiMQ::run_info::load(pending_command&& pending) {
+ArqmaMQ::run_info& ArqmaMQ::run_info::load(pending_command&& pending) {
     return load(&pending.cat, std::move(pending.command), std::move(pending.conn),
             std::move(pending.data_parts), pending.callback);
 }
 
-LokiMQ::run_info& LokiMQ::run_info::load(batch_job&& bj, bool reply_job) {
+ArqmaMQ::run_info& ArqmaMQ::run_info::load(batch_job&& bj, bool reply_job) {
     is_batch_job = true;
     is_reply_job = reply_job;
     batch_jobno = bj.second;
@@ -1462,14 +1462,14 @@ LokiMQ::run_info& LokiMQ::run_info::load(batch_job&& bj, bool reply_job) {
     return *this;
 }
 
-void LokiMQ::proxy_run_worker(run_info& run) {
+void ArqmaMQ::proxy_run_worker(run_info& run) {
     if (!run.worker_thread.joinable())
-        run.worker_thread = std::thread{&LokiMQ::worker_thread, this, run.worker_id};
+        run.worker_thread = std::thread{&ArqmaMQ::worker_thread, this, run.worker_id};
     else
         send_routed_message(workers_socket, run.worker_routing_id, "RUN");
 }
 
-void LokiMQ::proxy_run_batch_jobs(std::queue<batch_job>& jobs, const int reserved, int& active, bool reply) {
+void ArqmaMQ::proxy_run_batch_jobs(std::queue<batch_job>& jobs, const int reserved, int& active, bool reply) {
     while (!jobs.empty() &&
             (active < reserved || static_cast<int>(workers.size() - idle_workers.size()) < general_workers)) {
         proxy_run_worker(get_idle_worker().load(std::move(jobs.front()), reply));
@@ -1478,7 +1478,7 @@ void LokiMQ::proxy_run_batch_jobs(std::queue<batch_job>& jobs, const int reserve
     }
 }
 
-void LokiMQ::proxy_process_queue() {
+void ArqmaMQ::proxy_process_queue() {
     // First up: process any batch jobs; since these are internal they are given higher priority.
     proxy_run_batch_jobs(batch_jobs, batch_jobs_reserved, batch_jobs_active, false);
 
@@ -1502,7 +1502,7 @@ void LokiMQ::proxy_process_queue() {
     }
 }
 
-void LokiMQ::proxy_to_worker(size_t conn_index, std::vector<zmq::message_t>& parts) {
+void ArqmaMQ::proxy_to_worker(size_t conn_index, std::vector<zmq::message_t>& parts) {
     bool outgoing = connections[conn_index].getsockopt<int>(ZMQ_TYPE) == ZMQ_DEALER;
 
     peer_info tmp_peer;
@@ -1605,7 +1605,7 @@ void LokiMQ::proxy_to_worker(size_t conn_index, std::vector<zmq::message_t>& par
     category.active_threads++;
 }
 
-bool LokiMQ::proxy_check_auth(size_t conn_index, bool outgoing, const peer_info& peer,
+bool ArqmaMQ::proxy_check_auth(size_t conn_index, bool outgoing, const peer_info& peer,
         const std::string& command, const category& cat, zmq::message_t& msg) {
     std::string reply;
     if (peer.auth_level < cat.access.auth) {
@@ -1615,7 +1615,7 @@ bool LokiMQ::proxy_check_auth(size_t conn_index, bool outgoing, const peer_info&
     }
     else if (cat.access.local_sn && !local_service_node) {
         LMQ_LOG(warn, "Access denied to ", command, " for peer [", to_hex(peer.pubkey), "]/", peer_address(msg),
-                ": that command is only available when this LokiMQ is running in service node mode");
+                ": that command is only available when this ArqmaMQ is running in service node mode");
         reply = "NOT_A_SERVICE_NODE";
     }
     else if (cat.access.remote_sn && !peer.service_node) {
@@ -1641,7 +1641,7 @@ bool LokiMQ::proxy_check_auth(size_t conn_index, bool outgoing, const peer_info&
     return false;
 }
 
-void LokiMQ::process_zap_requests() {
+void ArqmaMQ::process_zap_requests() {
     for (std::vector<zmq::message_t> frames; recv_message_parts(zap_auth, frames, zmq::recv_flags::dontwait); frames.clear()) {
 #ifndef NDEBUG
         if (log_level() >= LogLevel::trace) {
@@ -1760,17 +1760,17 @@ void LokiMQ::process_zap_requests() {
     }
 }
 
-LokiMQ::~LokiMQ() {
+ArqmaMQ::~ArqmaMQ() {
     if (!proxy_thread.joinable())
         return;
 
-    LMQ_LOG(info, "LokiMQ shutting down proxy thread");
+    LMQ_LOG(info, "ArqmaMQ shutting down proxy thread");
     detail::send_control(get_control_socket(), "QUIT");
     proxy_thread.join();
-    LMQ_LOG(info, "LokiMQ proxy thread has stopped");
+    LMQ_LOG(info, "ArqmaMQ proxy thread has stopped");
 }
 
-ConnectionID LokiMQ::connect_sn(string_view pubkey, std::chrono::milliseconds keep_alive, string_view hint) {
+ConnectionID ArqmaMQ::connect_sn(string_view pubkey, std::chrono::milliseconds keep_alive, string_view hint) {
     check_started(proxy_thread, "connect");
 
     detail::send_control(get_control_socket(), "CONNECT_SN", bt_serialize<bt_dict>({{"pubkey",pubkey}, {"keep-alive",keep_alive.count()}, {"hint",hint}}));
@@ -1778,7 +1778,7 @@ ConnectionID LokiMQ::connect_sn(string_view pubkey, std::chrono::milliseconds ke
     return pubkey;
 }
 
-ConnectionID LokiMQ::connect_remote(string_view remote, ConnectSuccess on_connect, ConnectFailure on_failure,
+ConnectionID ArqmaMQ::connect_remote(string_view remote, ConnectSuccess on_connect, ConnectFailure on_failure,
         string_view pubkey, AuthLevel auth_level, std::chrono::milliseconds timeout) {
     if (!proxy_thread.joinable())
         LMQ_LOG(warn, "connect_remote() called before start(); this won't take effect until start() is called");
@@ -1802,7 +1802,7 @@ ConnectionID LokiMQ::connect_remote(string_view remote, ConnectSuccess on_connec
     return id;
 }
 
-void LokiMQ::proxy_connect_remote(bt_dict_consumer data) {
+void ArqmaMQ::proxy_connect_remote(bt_dict_consumer data) {
     AuthLevel auth_level = AuthLevel::none;
     long long conn_id = -1;
     ConnectSuccess on_connect;
@@ -1870,7 +1870,7 @@ void LokiMQ::proxy_connect_remote(bt_dict_consumer data) {
     peers.emplace(std::move(conn), std::move(peer));
 }
 
-void LokiMQ::disconnect(ConnectionID id, std::chrono::milliseconds linger) {
+void ArqmaMQ::disconnect(ConnectionID id, std::chrono::milliseconds linger) {
     detail::send_control(get_control_socket(), "DISCONNECT", bt_serialize<bt_dict>({
             {"conn_id", id.id},
             {"linger_ms", linger.count()},
@@ -1878,7 +1878,7 @@ void LokiMQ::disconnect(ConnectionID id, std::chrono::milliseconds linger) {
     }));
 }
 
-void LokiMQ::proxy_disconnect(bt_dict_consumer data) {
+void ArqmaMQ::proxy_disconnect(bt_dict_consumer data) {
     ConnectionID connid{-1};
     std::chrono::milliseconds linger = 1s;
 
@@ -1894,7 +1894,7 @@ void LokiMQ::proxy_disconnect(bt_dict_consumer data) {
 
     proxy_disconnect(std::move(connid), linger);
 }
-void LokiMQ::proxy_disconnect(ConnectionID conn, std::chrono::milliseconds linger) {
+void ArqmaMQ::proxy_disconnect(ConnectionID conn, std::chrono::milliseconds linger) {
     LMQ_TRACE("Disconnecting outgoing connection to ", conn);
     auto pr = peers.equal_range(conn);
     for (auto it = pr.first; it != pr.second; ++it) {
@@ -1909,14 +1909,14 @@ void LokiMQ::proxy_disconnect(ConnectionID conn, std::chrono::milliseconds linge
     LMQ_LOG(warn, "Failed to disconnect ", conn, ": no such outgoing connection");
 }
 
-void LokiMQ::job(std::function<void()> f) {
+void ArqmaMQ::job(std::function<void()> f) {
     auto* b = new Batch<void>;
     b->add_job(std::move(f));
     auto* baseptr = static_cast<detail::Batch*>(b);
     detail::send_control(get_control_socket(), "BATCH", bt_serialize(reinterpret_cast<uintptr_t>(baseptr)));
 }
 
-void LokiMQ::_queue_timer_job(int timer_id) {
+void ArqmaMQ::_queue_timer_job(int timer_id) {
     auto it = timer_jobs.find(timer_id);
     if (it == timer_jobs.end()) {
         LMQ_LOG(warn, "Could not find timer job ", timer_id);
@@ -1948,7 +1948,7 @@ void LokiMQ::_queue_timer_job(int timer_id) {
     assert(b->size() == 1);
 }
 
-void LokiMQ::add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch) {
+void ArqmaMQ::add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch) {
     if (proxy_thread.joinable()) {
         auto *jobptr = new std::function<void()>{std::move(job)};
         detail::send_control(get_control_socket(), "TIMER", bt_serialize(bt_list{{
@@ -1960,7 +1960,7 @@ void LokiMQ::add_timer(std::function<void()> job, std::chrono::milliseconds inte
     }
 }
 
-void LokiMQ::TimersDeleter::operator()(void* timers) { zmq_timers_destroy(&timers); }
+void ArqmaMQ::TimersDeleter::operator()(void* timers) { zmq_timers_destroy(&timers); }
 
 std::ostream &operator<<(std::ostream &os, LogLevel lvl) {
     os <<  (lvl == LogLevel::trace ? "trace" :
@@ -1983,5 +1983,5 @@ std::string make_random_string(size_t size) {
     return rando;
 }
 
-} // namespace lokimq
+} // namespace arqmamq
 // vim:sw=4:et

@@ -28,7 +28,7 @@
 
 #include "bt_serialize.h"
 
-namespace lokimq {
+namespace arqmamq {
 namespace detail {
 
 /// Reads digits into an unsigned 64-bit int.  
@@ -230,4 +230,4 @@ std::pair<string_view, string_view> bt_dict_consumer::next_string() {
 }
 
 
-} // namespace lokimq
+} // namespace arqmamq

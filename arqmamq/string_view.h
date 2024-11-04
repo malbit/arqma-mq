@@ -33,14 +33,14 @@
 #ifdef __cpp_lib_string_view
 
 #include <string_view>
-namespace lokimq { using string_view = std::string_view; }
+namespace arqmamq { using string_view = std::string_view; }
 
 #else
 
 #include <ostream>
 #include <limits>
 
-namespace lokimq {
+namespace arqmamq {
 
 /// Basic implementation of std::string_view (except for std::hash support).
 class simple_string_view {
@@ -240,7 +240,7 @@ using string_view = simple_string_view;
 
 // Add a "foo"_sv literal that works exactly like the C++17 "foo"sv literal, but works with out
 // implementation in pre-C++17.
-namespace lokimq {
+namespace arqmamq {
 inline namespace literals {
     inline string_view operator""_sv(const char* str, size_t len) { return {str, len}; }
 }

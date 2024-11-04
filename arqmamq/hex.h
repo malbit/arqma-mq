@@ -32,7 +32,7 @@
 #include <iterator>
 #include <cassert>
 
-namespace lokimq {
+namespace arqmamq {
 
 namespace detail {
 

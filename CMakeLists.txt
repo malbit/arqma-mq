@@ -1,23 +1,23 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
-project(liblokimq CXX)
+project(libarqmamq CXX)
 
 include(GNUInstallDirs)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-add_library(lokimq
-    lokimq/lokimq.cpp
-    lokimq/bt_serialize.cpp
+add_library(arqmamq
+    arqmamq/arqmamq.cpp
+    arqmamq/bt_serialize.cpp
 )
 
 install(
-    FILES lokimq/batch.h
-          lokimq/bt_serialize.h
-          lokimq/hex.h
-          lokimq/lokimq.h
-          lokimq/string_view.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lokimq
+    FILES arqmamq/batch.h
+          arqmamq/bt_serialize.h
+          arqmamq/hex.h
+          arqmamq/arqmamq.h
+          arqmamq/string_view.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/arqmamq
 )
 
 # We require cppzmq >= 4.3, and versions before 4.3.2 have some security issues, so try to find
@@ -33,7 +33,7 @@ endif()
 set(CPPZMQ_BUILD_TESTS OFF CACHE BOOL "Disable cppzmq tests")
 add_subdirectory(cppzmq EXCLUDE_FROM_ALL)
 
-target_include_directories(lokimq
+target_include_directories(arqmamq
     PUBLIC
         $<INSTALL_INTERFACE:>
         $<INSTALL_INTERFACE:mapbox-variant/include>
@@ -41,14 +41,14 @@ target_include_directories(lokimq
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/mapbox-variant/include>
 )
 
-target_compile_options(lokimq PRIVATE -Wall -Wextra -Werror)
-set_target_properties(lokimq PROPERTIES
+target_compile_options(arqmamq PRIVATE -Wall -Wextra -Werror)
+set_target_properties(arqmamq PROPERTIES
     CXX_STANDARD 14
     CXX_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
 )
 
-target_link_libraries(lokimq PUBLIC cppzmq)
+target_link_libraries(arqmamq PUBLIC cppzmq)
 
 if(NOT SODIUM_LIBRARIES)
     pkg_search_module(SODIUM REQUIRED libsodium)
@@ -56,31 +56,31 @@ endif()
 
 # Really want to just use SODIUM_LINK_LIBRARIES here, but that isn't in older cmake:
 find_library(libsodium_link_libs NAMES ${SODIUM_LIBRARIES} PATHS ${SODIUM_LIBRARY_DIRS})
-target_link_libraries(lokimq PRIVATE ${libsodium_link_libs})
+target_link_libraries(arqmamq PRIVATE ${libsodium_link_libs})
 
-target_include_directories(lokimq PRIVATE ${SODIUM_INCLUDE_DIRS})
+target_include_directories(arqmamq PRIVATE ${SODIUM_INCLUDE_DIRS})
 
-add_library(lokimq::lokimq ALIAS lokimq)
+add_library(arqmamq::arqmamq ALIAS arqmamq)
 
 export(
-    TARGETS lokimq
-    NAMESPACE lokimq::
-    FILE lokimqTargets.cmake
+    TARGETS arqmamq
+    NAMESPACE arqmamq::
+    FILE arqmamqTargets.cmake
 )
 install(
-    TARGETS lokimq
-    EXPORT lokimqConfig
+    TARGETS arqmamq
+    EXPORT arqmamqConfig
     DESTINATION lib
 )
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
-  set(lokimq_IS_TOPLEVEL_PROJECT TRUE)
+  set(arqmamq_IS_TOPLEVEL_PROJECT TRUE)
 else()
-  set(lokimq_IS_TOPLEVEL_PROJECT FALSE)
+  set(arqmamq_IS_TOPLEVEL_PROJECT FALSE)
 endif()
 
-option(LOKIMQ_BUILD_TESTS "Building and perform lokimq tests" ${lokimq_IS_TOPLEVEL_PROJECT})
-if(LOKIMQ_BUILD_TESTS)
+option(ARQMAMQ_BUILD_TESTS "Building and perform arqmamq tests" ${arqmamq_IS_TOPLEVEL_PROJECT})
+if(ARQMAMQ_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
