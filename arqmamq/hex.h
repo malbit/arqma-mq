@@ -27,10 +27,12 @@
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
-#include "string_view.h"
+#include <string>
+#include <string_view>
 #include <array>
 #include <iterator>
 #include <cassert>
+#include "byte_type.h"
 
 namespace arqmamq {
 
@@ -55,38 +57,65 @@ struct hex_table {
     constexpr char to_hex(unsigned char b) const noexcept { return to_hex_lut[b]; }
 } constexpr hex_lut;
 
+static_assert(hex_lut.from_hex('a') == 10 && hex_lut.from_hex('F') == 15 && hex_lut.to_hex(13) == 'd', "");
+
 } // namespace detail
 
 /// Creates hex digits from a character sequence.
 template <typename InputIt, typename OutputIt>
 void to_hex(InputIt begin, InputIt end, OutputIt out) {
+    static_assert(sizeof(decltype(*begin)) == 1, "to_hex requires chars/bytes");
     for (; begin != end; ++begin) {
-        auto c = *begin;
-        *out++ = detail::hex_lut.to_hex((c & 0xf0) >> 4);
+        uint8_t c = static_cast<uint8_t>(*begin);
+        *out++ = detail::hex_lut.to_hex(c >> 4);
         *out++ = detail::hex_lut.to_hex(c & 0x0f);
     }
 }
 
-/// Creates a hex string from an iterable, std::string-like object
-inline std::string to_hex(string_view s) {
-    std::string hex;
-    hex.reserve(s.size() * 2);
-    to_hex(s.begin(), s.end(), std::back_inserter(hex));
-    return hex;
+template <typename It>
+std::string to_hex(It begin, It end) {
+  std::string hex;
+  if constexpr (std::is_base_of_v<std::random_access_iterator_tag, typename std::iterator_traits<It>::iterator_category>)
+    hex.reserve(2 * std::distance(begin, end));
+  to_hex(begin, end, std::back_inserter(hex));
+  return hex;
 }
 
-/// Returns true if all elements in the range are hex characters
+template <typename CharT>
+std::string to_hex(std::basic_string_view<CharT> s) { return to_hex(s.begin(), s.end()); }
+inline std::string to_hex(std::string_view s) { return to_hex<>(s); }
+
+template <typename CharT>
+constexpr bool is_hex_digit(CharT c)
+{
+  static_assert(sizeof(CharT) == 1, "is_hex requires chars/bytes");
+  return detail::hex_lut.from_hex(static_cast<unsigned char>(c)) != 0 || static_cast<unsigned char>(c) == '0';
+}
+
 template <typename It>
 constexpr bool is_hex(It begin, It end) {
-    for (; begin != end; ++begin) {
-        if (detail::hex_lut.from_hex(*begin) == 0 && *begin != '0')
-            return false;
+    static_assert(sizeof(decltype(*begin)) == 1, "is_hex requires chars/bytes");
+    constexpr bool ra = std::is_base_of_v<std::random_access_iterator_tag, typename std::iterator_traits<It>::iterator_category>;
+    if constexpr (ra)
+      if (std::distance(begin, end) % 2 != 0)
+        return false;
+
+    size_t count = 0;
+    for (; begin != end; ++begin)
+    {
+      if constexpr (!ra) ++count;
+      if (!is_hex_digit(*begin))
+        return false;
     }
+    if constexpr (!ra)
+      return count % 2 == 0;
     return true;
 }
 
 /// Returns true if all elements in the string-like value are hex characters
-constexpr bool is_hex(string_view s) { return is_hex(s.begin(), s.end()); }
+template <typename CharT>
+constexpr bool is_hex(std::basic_string_view<CharT> s) { return is_hex(s.begin(), s.end()); }
+constexpr bool is_hex(std::string_view s) { return is_hex(s.begin(), s.end()); }
 
 /// Convert a hex digit into its numeric (0-15) value
 constexpr char from_hex_digit(unsigned char x) noexcept {
@@ -96,27 +125,28 @@ constexpr char from_hex_digit(unsigned char x) noexcept {
 /// Constructs a byte value from a pair of hex digits
 constexpr char from_hex_pair(unsigned char a, unsigned char b) noexcept { return (from_hex_digit(a) << 4) | from_hex_digit(b); }
 
-/// Converts a sequence of hex digits to bytes.  Undefined behaviour if any characters are not in
-/// [0-9a-fA-F] or if the input sequence length is not even.  It is permitted for the input and
-/// output ranges to overlap as long as out is no earlier than begin.
 template <typename InputIt, typename OutputIt>
 void from_hex(InputIt begin, InputIt end, OutputIt out) {
     using std::distance;
-    assert(distance(begin, end) % 2 == 0);
+    assert(is_hex(begin, end));
     while (begin != end) {
         auto a = *begin++;
         auto b = *begin++;
-        *out++ = from_hex_pair(a, b);
+        *out++ = static_cast<detail::byte_type_t<OutputIt>>(from_hex_pair(static_cast<unsigned char>(a), static_cast<unsigned char>(b)));
     }
 }
 
-/// Converts hex digits from a std::string-like object into a std::string of bytes.  Undefined
-/// behaviour if any characters are not in [0-9a-fA-F] or if the input sequence length is not even.
-inline std::string from_hex(string_view s) {
-    std::string bytes;
-    bytes.reserve(s.size() / 2);
-    from_hex(s.begin(), s.end(), std::back_inserter(bytes));
-    return bytes;
+template <typename It>
+std::string from_hex(It begin, It end) {
+  std::string bytes;
+  if constexpr (std::is_base_of_v<std::random_access_iterator_tag, typename std::iterator_traits<It>::iterator_category>)
+    bytes.reserve(std::distance(begin, end) / 2);
+  from_hex(begin, end, std::back_inserter(bytes));
+  return bytes;
 }
+
+template <typename CharT>
+std::string from_hex(std::basic_string_view<CharT> s) { return from_hex(s.begin(), s.end()); }
+inline std::string from_hex(std::string_view s) { return from_hex<>(s); }
 
 }

@@ -36,18 +36,24 @@ namespace arqmamq {
 
 namespace detail {
 
-enum class BatchStatus {
+enum class BatchState {
     running, // there are still jobs to run (or running)
     complete, // the batch is complete but still has a completion job to call
-    complete_proxy, // same as `complete`, but the completion job should be invoked immediately in the proxy thread (be very careful)
     done // the batch is complete and has no completion function
+};
+
+struct BatchStatus {
+  BatchState state;
+  int thread;
 };
 
 // Virtual base class for Batch<R>
 class Batch {
 public:
     // Returns the number of jobs in this batch
-    virtual size_t size() const = 0;
+    virtual std::pair<size_t, bool> size() const = 0;
+
+    virtual std::vector<int> threads() const = 0;
     // Called in a worker thread to run the job
     virtual void run_job(int i) = 0;
     // Called in the main proxy thread when the worker returns from finishing a job.  The return
@@ -151,12 +157,13 @@ public:
     Batch &operator=(const Batch&) = delete;
 
 private:
-    std::vector<std::function<R()>> jobs;
+    std::vector<std::pair<std::function<R()>, int>> jobs;
     std::vector<job_result<R>> results;
     CompletionFunc complete;
     std::size_t jobs_outstanding = 0;
-    bool complete_in_proxy = false;
+    int complete_in_thread = 0;
     bool started = false;
+    bool tagged_thread_jobs = false;
 
     void check_not_started() {
         if (started)
@@ -175,38 +182,47 @@ public:
     /// available.  The called function may throw exceptions (which will be propagated to the
     /// completion function through the job_result values).  There is no guarantee on the order of
     /// invocation of the jobs.
-    void add_job(std::function<R()> job) {
+    void add_job(std::function<R()> job, std::optional<TaggedThreadID> thread = std::nullopt) {
         check_not_started();
-        jobs.emplace_back(std::move(job));
-        results.emplace_back();
-        jobs_outstanding++;
+        if (thread && thread->_id == -1)
+          throw std::logic_error{"Cannot add a proxy thread batch job"};
+        add_job(std::move(job), thread ? thread->_id : 0);
     }
 
     /// Sets the completion function to invoke after all jobs have finished.  If this is not set
     /// then jobs simply run and results are discarded.
-    void completion(CompletionFunc comp) {
+    void completion(CompletionFunc comp, std::optional<TaggedThreadID> thread = std::nullopt) {
         check_not_started();
         if (complete)
             throw std::logic_error("Completion function can only be set once");
         complete = std::move(comp);
-    }
-
-    /// Sets a completion function to invoke *IN THE PROXY THREAD* after all jobs have finished.  Be
-    /// very, very careful: this should not be a job that takes any significant amount of CPU time
-    /// or can block for any reason (NO MUTEXES).
-    void completion_proxy(CompletionFunc comp) {
-        check_not_started();
-        if (complete)
-            throw std::logic_error("Completion function can only be set once");
-        complete = std::move(comp);
-        complete_in_proxy = true;
+        complete_in_thread = thread ? thread->_id : 0;
     }
 
 private:
 
-    std::size_t size() const override {
-        return jobs.size();
+    void add_job(std::function<R()> job, int thread_id)
+    {
+      jobs.emplace_back(std::move(job), thread_id);
+      results.emplace_back();
+      jobs_outstanding++;
+      if (thread_id != 0)
+        tagged_thread_jobs = true;
     }
+
+    std::pair<std::size_t, bool> size() const override
+    {
+      return {jobs.size(), tagged_thread_jobs};
+    }
+
+    std::vector<int> threads() const override
+    {
+      std::vector<int> t;
+      t.reserve(jobs.size());
+      for (auto& j : jobs)
+        t.push_back(j.second);
+      return t;
+    };
 
     template <typename S = R>
     void set_value(job_result<S>& r, std::function<S()>& f) { r.set_value(f()); }
@@ -216,7 +232,7 @@ private:
         // called by worker thread
         auto& r = results[i];
         try {
-            set_value(r, jobs[i]);
+            set_value(r, jobs[i].first);
         } catch (...) {
             r.set_exception(std::current_exception());
         }
@@ -225,12 +241,10 @@ private:
     detail::BatchStatus job_finished() override {
         --jobs_outstanding;
         if (jobs_outstanding)
-            return detail::BatchStatus::running;
+            return {detail::BatchState::running, 0};
         if (complete)
-            return complete_in_proxy
-                ? detail::BatchStatus::complete_proxy
-                : detail::BatchStatus::complete;
-        return detail::BatchStatus::done;
+            return {detail::BatchState::complete, complete_in_thread};
+        return {detail::BatchState::done, 0};
     }
 
     void job_completion() override {
@@ -241,7 +255,7 @@ private:
 
 template <typename R>
 void ArqmaMQ::batch(Batch<R>&& batch) {
-    if (batch.size() == 0)
+    if (batch.size().first == 0)
         throw std::logic_error("Cannot batch a a job batch with 0 jobs");
     // Need to send this over to the proxy thread via the base class pointer.  It assumes ownership.
     auto* baseptr = static_cast<detail::Batch*>(new Batch<R>(std::move(batch)));

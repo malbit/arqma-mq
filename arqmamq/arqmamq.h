@@ -29,8 +29,10 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <list>
 #include <queue>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
@@ -41,9 +43,13 @@
 #include <chrono>
 #include <atomic>
 #include <cassert>
-#include <zmq.hpp>
+#include <cstdint>
+#include "zmq.hpp"
+#include "address.h"
 #include "bt_serialize.h"
-#include "string_view.h"
+#include "connections.h"
+#include "message.h"
+#include "auth.h"
 
 #if ZMQ_VERSION < ZMQ_MAKE_VERSION (4, 3, 0)
 // Timers were not added until 4.3.0
@@ -58,179 +64,40 @@ using namespace std::literals;
 /// build).
 enum class LogLevel { fatal, error, warn, info, debug, trace };
 
-/// Authentication levels for command categories and connections
-enum class AuthLevel {
-    denied, ///< Not actually an auth level, but can be returned by the AllowFunc to deny an incoming connection.
-    none, ///< No authentication at all; any random incoming ZMQ connection can invoke this command.
-    basic, ///< Basic authentication commands require a login, or a node that is specifically configured to be a public node (e.g. for public RPC).
-    admin, ///< Advanced authentication commands require an admin user, either via explicit login or by implicit login from localhost.  This typically protects administrative commands like shutting down, starting mining, or access sensitive data.
-};
-
-std::ostream& operator<<(std::ostream& os, AuthLevel a);
-
-/// The access level for a command category
-struct Access {
-    /// Minimum access level required
-    AuthLevel auth = AuthLevel::none;
-    /// If true only remote SNs may call the category commands
-    bool remote_sn = false;
-    /// If true the category requires that the local node is a SN
-    bool local_sn = false;
-};
-
-/// Return type of the AllowFunc: this determines whether we allow the connection at all, and if so,
-/// sets the initial authentication level and tells ArqmaMQ whether the other end is an active SN.
-struct Allow {
-    AuthLevel auth = AuthLevel::none;
-    bool remote_sn = false;
-};
-
-class ArqmaMQ;
-
-/// Opaque data structure representing a connection which supports ==, !=, < and std::hash.  For
-/// connections to service node this is the service node pubkey (and you can pass a 32-byte string
-/// anywhere a ConnectionID is called for).  For non-SN remote connections you need to keep a copy
-/// of the ConnectionID returned by connect_remote().
-struct ConnectionID {
-    ConnectionID(std::string pubkey_) : id{SN_ID}, pk{std::move(pubkey_)} {
-        if (pk.size() != 32)
-            throw std::runtime_error{"Invalid pubkey: expected 32 bytes"};
-    }
-    ConnectionID(string_view pubkey_) : ConnectionID(std::string{pubkey_}) {}
-    ConnectionID(const ConnectionID&) = default;
-    ConnectionID(ConnectionID&&) = default;
-    ConnectionID& operator=(const ConnectionID&) = default;
-    ConnectionID& operator=(ConnectionID&&) = default;
-
-    // Returns true if this is a ConnectionID (false for a default-constructed, invalid id)
-    explicit operator bool() const {
-        return id != 0;
-    }
-
-    // Two ConnectionIDs are equal if they are both SNs and have matching pubkeys, or they are both
-    // not SNs and have matching internal IDs.  (Pubkeys do not have to match for non-SNs, and
-    // routes are not considered for equality at all).
-    bool operator==(const ConnectionID &o) const {
-        if (id == SN_ID && o.id == SN_ID)
-            return pk == o.pk;
-        return id == o.id;
-    }
-    bool operator!=(const ConnectionID &o) const { return !(*this == o); }
-    bool operator<(const ConnectionID &o) const {
-        if (id == SN_ID && o.id == SN_ID)
-            return pk < o.pk;
-        return id < o.id;
-    }
-    // Returns true if this ConnectionID represents a SN connection
-    bool sn() const { return id == SN_ID; }
-
-    // Returns this connection's pubkey, if any.  (Note that it is possible to have a pubkey and not
-    // be a SN when connecting to secure remotes: having a non-empty pubkey does not imply that
-    // `sn()` is true).
-    const std::string& pubkey() const { return pk; }
-    // Default construction; creates a ConnectionID with an invalid internal ID that will not match
-    // an actual connection.
-    ConnectionID() : ConnectionID(0) {}
-private:
-    ConnectionID(long long id) : id{id} {}
-    ConnectionID(long long id, std::string pubkey, std::string route = "")
-        : id{id}, pk{std::move(pubkey)}, route{std::move(route)} {}
-
-    constexpr static long long SN_ID = -1;
-    long long id = 0;
-    std::string pk;
-    std::string route;
-    friend class ArqmaMQ;
-    friend struct std::hash<ConnectionID>;
-    template <typename... T>
-    friend bt_dict build_send(ConnectionID to, string_view cmd, const T&... opts);
-    friend std::ostream& operator<<(std::ostream& o, const ConnectionID& conn);
-};
-
-} // namespace arqmamq
-namespace std {
-    // Need this here because we stick it in an unordered_map below.
-    template <> struct hash<arqmamq::ConnectionID> {
-        size_t operator()(const arqmamq::ConnectionID &c) const {
-            return c.sn() ? std::hash<std::string>{}(c.pk) :
-                std::hash<long long>{}(c.id);
-        }
-    };
-} // namespace std
-namespace arqmamq {
-
-/// Encapsulates an incoming message from a remote connection with message details plus extra
-/// info need to send a reply back through the proxy thread via the `reply()` method.  Note that
-/// this object gets reused: callbacks should use but not store any reference beyond the callback.
-class Message {
-public:
-    ArqmaMQ& arqmamq; ///< The owning ArqmaMQ object
-    std::vector<string_view> data; ///< The provided command data parts, if any.
-    ConnectionID conn; ///< The connection info for routing a reply; also contains the pubkey/sn status.
-    std::string reply_tag; ///< If the invoked command is a request command this is the required reply tag that will be prepended by `send_reply()`.
-
-    /// Constructor
-    Message(ArqmaMQ& arqmq, ConnectionID cid) : arqmamq{arqmq}, conn{std::move(cid)} {}
-
-    // Non-copyable
-    Message(const Message&) = delete;
-    Message& operator=(const Message&) = delete;
-
-    /// Sends a command back to whomever sent this message.  Arguments are forwarded to send() but
-    /// with send_option::optional{} added if the originator is not a SN.  For SN messages (i.e.
-    /// where `sn` is true) this is a "strong" reply by default in that the proxy will attempt to
-    /// establish a new connection to the SN if no longer connected.  For non-SN messages the reply
-    /// will be attempted using the available routing information, but if the connection has already
-    /// been closed the reply will be dropped.
-    ///
-    /// If you want to send a non-strong reply even when the remote is a service node then add
-    /// an explicit `send_option::optional()` argument.
-    template <typename... Args>
-    void send_back(string_view, Args&&... args);
-
-    /// Sends a reply to a request.  This takes no command: the command is always the built-in
-    /// "REPLY" command, followed by the unique reply tag, then any reply data parts.  All other
-    /// arguments are as in `send_back()`.  You should only send one reply for a command expecting
-    /// replies, though this is not enforced: attempting to send multiple replies will simply be
-    /// dropped when received by the remote.  (Note, however, that it is possible to send multiple
-    /// messages -- e.g. you could send a reply and then also call send_back() and/or send_request()
-    /// to send more requests back to the sender).
-    template <typename... Args>
-    void send_reply(Args&&... args);
-
-    /// Sends a request back to whomever sent this message.  This is effectively a wrapper around
-    /// arqmq.request() that takes care of setting up the recipient arguments.
-    template <typename ReplyCallback, typename... Args>
-    void send_request(string_view cmd, ReplyCallback&& callback, Args&&... args);
-};
-
 // Forward declarations; see batch.h
 namespace detail { class Batch; }
 template <typename R> class Batch;
 
-/** The keep-alive time for a send() that results in a establishing a new outbound connection.  To
- * use a longer keep-alive to a host call `connect()` first with the desired keep-alive time or pass
+/** The keep_alive time for a send() that results in a establishing a new outbound connection.  To
+ * use a longer keep_alive to a host call `connect()` first with the desired keep_alive time or pass
  * the send_option::keep_alive.
  */
-static constexpr auto DEFAULT_SEND_KEEP_ALIVE = 30s;
+inline constexpr auto DEFAULT_SEND_KEEP_ALIVE = 30s;
 
-// How frequently we cleanup connections (closing idle connections, calling connect or request failure callbacks)
-static constexpr auto CONN_CHECK_INTERVAL = 1s;
+inline constexpr auto DEFAULT_CONNECT_SN_KEEP_ALIVE = 5min;
 
 // The default timeout for connect_remote()
-static constexpr auto REMOTE_CONNECT_TIMEOUT = 10s;
+inline constexpr auto REMOTE_CONNECT_TIMEOUT = 10s;
 
-// The minimum amount of time we wait for a reply to a REQUEST before calling the callback with
+// The amount of time we wait for a reply to a REQUEST before calling the callback with
 // `false` to signal a timeout.
-static constexpr auto REQUEST_TIMEOUT = 15s;
+inline constexpr auto DEFAULT_REQUEST_TIMEOUT = 15s;
 
 /// Maximum length of a category
-static constexpr size_t MAX_CATEGORY_LENGTH = 50;
+inline constexpr size_t MAX_CATEGORY_LENGTH = 50;
 
 /// Maximum length of a command
-static constexpr size_t MAX_COMMAND_LENGTH = 200;
+inline constexpr size_t MAX_COMMAND_LENGTH = 200;
 
 class CatHelper;
+
+struct TaggedThreadID {
+private:
+  int _id;
+  explicit constexpr TaggedThreadID(int id) : _id{id} {}
+  friend class ArqmaMQ;
+  template <typename R> friend class Batch;
+};
 
 /**
  * Class that handles ArqmaMQ listeners, connections, proxying, and workers.  An application
@@ -262,20 +129,18 @@ private:
     /// control sockets from threads trying to talk to the proxy thread.
     bool proxy_shutting_down = false;
 
+    std::mutex control_sockets_mutex;
+
     /// Called to obtain a "command" socket that attaches to `control` to send commands to the
     /// proxy thread from other threads.  This socket is unique per thread and ArqmaMQ instance.
     zmq::socket_t& get_control_socket();
 
-    /// Stores all of the sockets created in different threads via `get_control_socket`.  This is
-    /// only used during destruction to close all of those open sockets, and is protected by an
-    /// internal mutex which is only locked by new threads getting a control socket and the
-    /// destructor.
-    std::vector<std::shared_ptr<zmq::socket_t>> thread_control_sockets;
+    std::unordered_map<std::thread::id, std::unique_ptr<zmq::socket_t>> control_sockets;
 
 public:
 
     /// Callback type invoked to determine whether the given new incoming connection is allowed to
-    /// connect to us and to set its initial authentication level.
+    /// connect to us and to set its authentication level.
     ///
     /// @param ip - the ip address of the incoming connection
     /// @param pubkey - the x25519 pubkey of the connecting client (32 byte string).  Note that this
@@ -284,12 +149,12 @@ public:
     ///
     /// @returns an `AuthLevel` enum value indicating the default auth level for the incoming
     /// connection, or AuthLevel::denied if the connection should be refused.
-    using AllowFunc = std::function<Allow(string_view ip, string_view pubkey)>;
+    using AllowFunc = std::function<AuthLevel(std::string_view address, std::string_view pubkey, bool service_node)>;
 
     /// Callback that is invoked when we need to send a "strong" message to a SN that we aren't
     /// already connected to and need to establish a connection.  This callback returns the ZMQ
     /// connection string we should use which is typically a string such as `tcp://1.2.3.4:5678`.
-    using SNRemoteAddress = std::function<std::string(string_view pubkey)>;
+    using SNRemoteAddress = std::function<std::string(std::string_view pubkey)>;
 
     /// The callback type for registered commands.
     using CommandCallback = std::function<void(Message& message)>;
@@ -307,7 +172,7 @@ public:
     /// Callback for the success case of connect_remote()
     using ConnectSuccess = std::function<void(ConnectionID)>;
     /// Callback for the failure case of connect_remote()
-    using ConnectFailure = std::function<void(ConnectionID, string_view)>;
+    using ConnectFailure = std::function<void(ConnectionID, std::string_view)>;
 
     /// Explicitly non-copyable, non-movable because most things here aren't copyable, and a few
     /// things aren't movable, either.  If you need to pass the ArqmaMQ instance around, wrap it
@@ -329,16 +194,41 @@ public:
      * (for example when testing), and so this option can be overridden to `false` to use completely
      * random zmq routing ids on outgoing connections (which will thus allow multiple connections).
      */
-    bool PUBKEY_BASED_ROUTING_ID = true;
+    bool EPHEMERAL_ROUTING_ID = false;
 
     /** Maximum incoming message size; if a remote tries sending a message larger than this they get
      * disconnected. -1 means no limit. */
     int64_t MAX_MSG_SIZE = 1 * 1024 * 1024;
 
+    int MAX_SOCKETS = 10000;
+
+    std::chrono::milliseconds RECONNECT_INTERVAL = 250ms;
+
+    std::chrono::milliseconds RECONNECT_INTERVAL_MAX = 5s;
+
     /** How long (in ms) to linger sockets when closing them; this is the maximum time zmq spends
      * trying to sending pending messages before dropping them and closing the underlying socket
      * after the high-level zmq socket is closed. */
     std::chrono::milliseconds CLOSE_LINGER = 5s;
+
+    std::chrono::milliseconds CONN_CHECK_INTERVAL = 250ms;
+
+    std::chrono::milliseconds CONN_HEARTBEAT = 15s;
+
+    std::chrono::milliseconds CONN_HEARTBEAT_TIMEOUT = 30s;
+
+    void set_zmq_context_option(zmq::ctxopt option, int value);
+
+    int STARTUP_UMASK = -1;
+
+    int SOCKET_GID = -1;
+
+    int SOCKET_UID = -1;
+
+    inline static constexpr TaggedThreadID run_in_proxy{-1};
+
+    template <typename... T>
+    void log(LogLevel lvl, const char* filename, int line, const T&... stuff);
 
 private:
 
@@ -351,10 +241,6 @@ private:
 
     /// The callback to call with log messages
     Logger logger;
-
-    /// Logging implementation
-    template <typename... T>
-    void log_(LogLevel lvl, const char* filename, int line, const T&... stuff);
 
     ///////////////////////////////////////////////////////////////////////////////////
     /// NB: The following are all the domain of the proxy thread (once it is started)!
@@ -418,7 +304,6 @@ private:
     /// SN pubkey string.
     std::unordered_multimap<ConnectionID, peer_info> peers;
 
-    /// Maps connection indices (which can change) to ConnectionIDs (which are permanent).
     std::vector<ConnectionID> conn_index_to_id;
 
     /// Maps listening socket ConnectionIDs to connection index values (these don't have peers
@@ -432,7 +317,7 @@ private:
     /// we pass handshaking we move them out of here and (if set) trigger the on_connect callback.
     /// Unlike regular node-to-node peers, these have an extra "HI"/"HELLO" sequence that we used
     /// before we consider ourselves connected to the remote.
-    std::vector<std::tuple<size_t /*conn_index*/, long long /*conn_id*/, std::chrono::steady_clock::time_point, ConnectSuccess, ConnectFailure>> pending_connects;
+    std::list<std::tuple<size_t /*conn_index*/, long long /*conn_id*/, std::chrono::steady_clock::time_point, ConnectSuccess, ConnectFailure>> pending_connects;
 
     /// Pending requests that have been sent out but not yet received a matching "REPLY".  The value
     /// is the timeout timestamp.
@@ -465,7 +350,8 @@ private:
 
     /// Timers.  TODO: once cppzmq adds an interface around the zmq C timers API then switch to it.
     struct TimersDeleter { void operator()(void* timers); };
-    std::unordered_map<int, std::tuple<std::function<void()>, bool, bool>> timer_jobs; // id => {func, squelch, running}
+    struct timer_data { std::function<void()> function; bool squelch; bool running; int thread; };
+    std::unordered_map<int, timer_data> timer_jobs;
     std::unique_ptr<void, TimersDeleter> timers;
 public:
     // This needs to be public because we have to be able to call it from a plain C function.
@@ -492,7 +378,7 @@ private:
     int active_workers() const { return workers.size() - idle_workers.size(); }
 
     /// Worker thread loop
-    void worker_thread(unsigned int index);
+    void worker_thread(unsigned int index, std::optional<std::string> tagged = std::nullopt, std::function<void()> start = nullptr);
 
     /// If set, skip polling for one proxy loop iteration (set when we know we have something
     /// processible without having to shove it onto a socket, such as scheduling an internal job).
@@ -541,16 +427,13 @@ private:
     /// gets called after all works have done so.
     void proxy_quit();
 
-    // Sets the various properties for a listening socket prior to binding.  If curve is true then
-    // the socket is set up using the keys and incoming connections must already know the pubkey to
-    // establish a connection; otherwise the connection is plaintext without authentication.
-    void setup_listening_socket(zmq::socket_t& socket, bool curve);
+    void setup_external_socket(zmq::socket_t& socket);
 
     // Sets the various properties on an outgoing socket prior to connection.  If remote_pubkey is
     // provided then the connection will be curve25519 encrypted and authenticate; otherwise it will
     // be unencrypted and unauthenticated.  Note that the remote end must be in the same mode (i.e.
     // either accepting curve connections, or not accepting curve).
-    void setup_outgoing_socket(zmq::socket_t& socket, string_view remote_pubkey = {});
+    void setup_outgoing_socket(zmq::socket_t& socket, std::string_view remote_pubkey, bool use_ephemeral_routing_id);
 
     /// Common connection implementation used by proxy_connect/proxy_send.  Returns the socket
     /// and, if a routing prefix is needed, the required prefix (or an empty string if not needed).
@@ -563,10 +446,10 @@ private:
     /// @param incoming_only only relay this if we have an established incoming connection from the
     /// given SN, otherwise don't connect (like `optional`)
     /// @param keep_alive the keep alive for the connection, if we establish a new outgoing
-    /// connection.  If we already have an outgoing connection then its keep-alive gets increased to
+    /// connection.  If we already have an outgoing connection then its keep_alive gets increased to
     /// this if currently less than this.
-    std::pair<zmq::socket_t*, std::string> proxy_connect_sn(string_view pubkey, string_view connect_hint,
-            bool optional, bool incoming_only, std::chrono::milliseconds keep_alive);
+    std::pair<zmq::socket_t*, std::string> proxy_connect_sn(std::string_view pubkey, std::string_view connect_hint,
+            bool optional, bool incoming_only, bool outgoing_only, bool ephemeral_routing_id, std::chrono::milliseconds keep_alive);
 
     /// CONNECT_SN command telling us to connect to a new pubkey.  Returns the socket (which could
     /// be existing or a new one).  This basically just unpacks arguments and passes them on to
@@ -610,7 +493,7 @@ private:
     void proxy_timer(bt_list_consumer timer_data);
 
     /// Same, but deserialized
-    void proxy_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch);
+    void proxy_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch, int thread);
 
     /// ZAP (https://rfc.zeromq.org/spec:27/ZAP/) authentication handler; this does non-blocking
     /// processing of any waiting authentication requests for new incoming connections.
@@ -651,15 +534,34 @@ private:
     /// done).
     std::unordered_map<std::string, std::string> command_aliases;
 
+    using cat_call_t = std::pair<category*, const std::pair<CommandCallback, bool>*>;
+
     /// Retrieve category and callback from a command name, including alias mapping.  Warns on
     /// invalid commands and returns nullptrs.  The command name will be updated in place if it is
     /// aliased to another command.
-    std::pair<category*, const std::pair<CommandCallback, bool>*> get_command(std::string& command);
+    cat_call_t get_command(std::string& command);
 
     /// Checks a peer's authentication level.  Returns true if allowed, warns and returns false if
     /// not.
     bool proxy_check_auth(size_t conn_index, bool outgoing, const peer_info& peer,
-            const std::string& command, const category& cat, zmq::message_t& msg);
+             zmq::message_t& command, const cat_call_t& cat_call, std::vector<zmq::message_t>& data);
+
+    struct injected_task {
+      category& cat;
+      std::string command;
+      std::string remote;
+      std::function<void()> callback;
+    };
+
+    void proxy_inject_task(injected_task task);
+
+    pubkey_set active_service_nodes;
+
+    void proxy_set_active_sns(std::string_view data);
+    void proxy_set_active_sns(pubkey_set pubkeys);
+    void proxy_update_active_sns(bt_list_consumer data);
+    void proxy_update_active_sns(pubkey_set added, pubkey_set removed);
+    void proxy_update_active_sns_clean(pubkey_set added, pubkey_set removed);
 
     /// Details for a pending command; such a command already has authenticated access and is just
     /// waiting for a thread to become available to handle it.
@@ -667,13 +569,18 @@ private:
         category& cat;
         std::string command;
         std::vector<zmq::message_t> data_parts;
-        const std::pair<CommandCallback, bool>* callback;
+        std::variant<const std::pair<CommandCallback, bool>*, std::function<void()>> callback;
         ConnectionID conn;
+        Access access;
+        std::string remote;
 
         pending_command(category& cat, std::string command, std::vector<zmq::message_t> data_parts,
-                const std::pair<CommandCallback, bool>* callback, ConnectionID conn)
+                const std::pair<CommandCallback, bool>* callback, ConnectionID conn, Access access, std::string remote)
             : cat{cat}, command{std::move(command)}, data_parts{std::move(data_parts)},
-            callback{callback}, conn{std::move(conn)} {}
+            callback{callback}, conn{std::move(conn)}, access{std::move(access)}, remote{std::move(remote)} {}
+
+        pending_command(category& cat, std::string command, std::function<void()> callback, std::string remote)
+          : cat{cat}, command{std::move(command)}, callback{std::move(callback)}, remote{std::move(remote)} {}
     };
     std::list<pending_command> pending_commands;
 
@@ -687,22 +594,25 @@ private:
     struct run_info {
         bool is_batch_job = false;
         bool is_reply_job = false;
+        bool is_tagged_thread_job = false;
+        bool is_injected = false;
+
+        void reset() { is_batch_job = is_reply_job = is_tagged_thread_job = is_injected = false; }
 
         // If is_batch_job is false then these will be set appropriate (if is_batch_job is true then
         // these shouldn't be accessed and likely contain stale data).
         category *cat;
         std::string command;
         ConnectionID conn; // The connection (or SN pubkey) to reply on/to.
+        Access access;
+        std::string remote;
         std::string conn_route; // if non-empty this is the reply routing prefix (for incoming connections)
         std::vector<zmq::message_t> data_parts;
 
         // If is_batch_job true then these are set (if is_batch_job false then don't access these!):
         int batch_jobno; // >= 0 for a job, -1 for the completion job
 
-        union {
-            const std::pair<CommandCallback, bool>* callback; // set if !is_batch_job
-            detail::Batch* batch;                             // set if is_batch_job
-        };
+        std::variant<const std::pair<CommandCallback, bool>*, detail::Batch*, std::function<void()>> to_run;
 
         // These belong to the proxy thread and must not be accessed by a worker:
         std::thread worker_thread;
@@ -710,19 +620,22 @@ private:
         std::string worker_routing_id; // "w123" where 123 == worker_id
 
         /// Loads the run info with an incoming command
-        run_info& load(category* cat, std::string command, ConnectionID conn,
+        run_info& load(category* cat, std::string command, ConnectionID conn, Access access, std::string remote,
                 std::vector<zmq::message_t> data_parts, const std::pair<CommandCallback, bool>* callback);
 
+        run_info& load(category* cat, std::string command, std::string remote, std::function<void()> callback);
         /// Loads the run info with a stored pending command
         run_info& load(pending_command&& pending);
         /// Loads the run info with a batch job
-        run_info& load(batch_job&& bj, bool reply_job = false);
+        run_info& load(batch_job&& bj, bool reply_job = false, int tagged_thread = 0);
     };
     /// Data passed to workers for the RUN command.  The proxy thread sets elements in this before
     /// sending RUN to a worker then the worker uses it to get call info, and only allocates it
     /// once, before starting any workers.  Workers may only access their own index and may not
     /// change it.
     std::vector<run_info> workers;
+
+    std::vector<std::tuple<run_info, bool, std::queue<batch_job>>> tagged_workers;
 
 public:
     /**
@@ -764,15 +677,11 @@ public:
             std::string privkey,
             bool service_node,
             SNRemoteAddress sn_lookup,
-            Logger logger = [](LogLevel, const char*, int, std::string) { });
+            Logger logger = [](LogLevel, const char*, int, std::string) { },
+            LogLevel level = LogLevel::warn);
 
-    /**
-     * Simplified ArqmaMQ constructor for a simple listener without any SN connection/authentication
-     * capabilities.  This treats all remotes as "basic", non-service node connections for command
-     * authentication purposes.
-     */
-    explicit ArqmaMQ(Logger logger = [](LogLevel, const char*, int, std::string) { })
-        : ArqmaMQ("", "", false, [](auto) { return ""s; /*no peer lookups*/ }, std::move(logger)) {}
+    explicit ArqmaMQ(Logger logger = [](LogLevel, const char*, int, std::string) { }, LogLevel level = LogLevel::warn)
+        : ArqmaMQ("", "", false, [](auto) { return ""s; /*no peer lookups*/ }, std::move(logger), level) {}
 
     /**
      * Destructor; instructs the proxy to quit.  The proxy tells all workers to quit, waits for them
@@ -856,6 +765,8 @@ public:
      */
     void add_command_alias(std::string from, std::string to);
 
+    TaggedThreadID add_tagged_thread(std::string name, std::function<void()> start = nullptr);
+
     /**
      * Sets the number of worker threads reserved for batch jobs.  If not explicitly called then
      * this defaults to half the general worker threads configured (rounded up).  This works exactly
@@ -913,10 +824,9 @@ public:
      * such as: "tcp://\*:4567" or "tcp://1.2.3.4:5678".
      *
      * @param allow_connection function to call to determine whether to allow the connection and, if
-     * so, the authentication level it receives.  If omitted the default returns non-service node,
-     * AuthLevel::none access.
+     * so, the authentication level it receives.  If omitted the default returns AuthLevel::none access.
      */
-    void listen_curve(std::string bind, AllowFunc allow_connection = [](auto, auto) { return Allow{AuthLevel::none, false}; });
+    void listen_curve(std::string bind, AllowFunc allow_connection = [](auto, auto, auto) { return AuthLevel::none; });
 
     /** Start listening on the given bind address in unauthenticated plain text mode.  Incoming
      * connections can come from anywhere.  `allow_connection` is invoked for any incoming
@@ -927,38 +837,12 @@ public:
      * such as: "tcp://\*:4567" or "tcp://1.2.3.4:5678".
      *
      * @param allow_connection function to call to determine whether to allow the connection and, if
-     * so, the authentication level it receives.  If omitted the default returns non-service node,
-     * AuthLevel::none access.
+     * so, the authentication level it receives.  If omitted the default returns AuthLevel::none access.
      */
-    void listen_plain(std::string bind, AllowFunc allow_connection = [](auto, auto) { return Allow{AuthLevel::none, false}; });
+    void listen_plain(std::string bind, AllowFunc allow_connection = [](auto, auto, auto) { return AuthLevel::none; });
 
-    /**
-     * Try to initiate a connection to the given SN in anticipation of needing a connection in the
-     * future.  If a connection is already established, the connection's idle timer will be reset
-     * (so that the connection will not be closed too soon).  If the given idle timeout is greater
-     * than the current idle timeout then the timeout increases to the new value; if less than the
-     * current timeout it is ignored.  (Note that idle timeouts only apply if the existing
-     * connection is an outgoing connection).
-     *
-     * Note that this method (along with send) doesn't block waiting for a connection; it merely
-     * instructs the proxy thread that it should establish a connection.
-     *
-     * @param pubkey - the public key (32-byte binary string) of the service node to connect to
-     * @param keep_alive - the connection will be kept alive if there was valid activity within
-     *                     the past `keep_alive` milliseconds.  If an outgoing connection already
-     *                     exists, the longer of the existing and the given keep alive is used.
-     *                     (Note that the default applied here is much longer than the default for an
-     *                     implicit connect() by calling send() directly.)
-     * @param hint - if non-empty and a new outgoing connection needs to be made this hint value
-     *               may be used instead of calling the lookup function.  (Note that there is no
-     *               guarantee that the hint will be used; it is only usefully specified if the
-     *               connection address has already been incidentally determined).
-     *
-     * @returns a ConnectionID that identifies an connection with the given SN.  Typically you
-     * *don't* need to worry about this (and can just discard it): you can always simply pass the
-     * pubkey as a string wherever a ConnectionID is called.
-     */
-    ConnectionID connect_sn(string_view pubkey, std::chrono::milliseconds keep_alive = 5min, string_view hint = {});
+    template <typename... Option>
+    ConnectionID connect_sn(std::string_view pubkey, const Option&... opts);
 
     /**
      * Establish a connection to the given remote with callbacks invoked on a successful or failed
@@ -990,8 +874,15 @@ public:
      * @param returns ConnectionID that uniquely identifies the connection to this remote node.  In
      * order to talk to it you will need the returned value (or a copy of it).
      */
-    ConnectionID connect_remote(string_view remote, ConnectSuccess on_connect, ConnectFailure on_failure,
-            string_view pubkey = {},
+    template <typename... Option>
+    ConnectionID connect_remote(const address& remote, ConnectSuccess on_connect, ConnectFailure on_failure, const Option&... options);
+
+    [[deprecated("use connect_remote() with arqmamq::address instead")]]
+    ConnectionID connect_remote(std::string_view remote, ConnectSuccess on_connect, ConnectFailure on_failure, AuthLevel auth_level = AuthLevel::none, std::chrono::milliseconds timeout = REMOTE_CONNECT_TIMEOUT);
+
+    [[deprecated("use connect_remote() with arqmamq::address instead")]]
+    ConnectionID connect_remote(std::string_view remote, ConnectSuccess on_connect, ConnectFailure on_failure,
+            std::string_view pubkey,
             AuthLevel auth_level = AuthLevel::none,
             std::chrono::milliseconds timeout = REMOTE_CONNECT_TIMEOUT);
 
@@ -1050,7 +941,7 @@ public:
      * connection hint may be used rather than performing a connection address lookup on the pubkey.
      */
     template <typename... T>
-    void send(ConnectionID to, string_view cmd, const T&... opts);
+    void send(ConnectionID to, std::string_view cmd, const T&... opts);
 
     /** Send a command configured as a "REQUEST" command to a service node: the data parts will be
      * prefixed with a random identifier.  The remote is expected to reply with a ["REPLY",
@@ -1068,12 +959,17 @@ public:
      * @param opts - anything else (i.e. strings, send_options) is forwarded to send().
      */
     template <typename... T>
-    void request(ConnectionID to, string_view cmd, ReplyCallback callback, const T&... opts);
+    void request(ConnectionID to, std::string_view cmd, ReplyCallback callback, const T&... opts);
+
+    void inject_task(const std::string& category, std::string command, std::string remote, std::function<void()> callback);
 
     /// The key pair this ArqmaMQ was created with; if empty keys were given during construction then
     /// this returns the generated keys.
     const std::string& get_pubkey() const { return pubkey; }
     const std::string& get_privkey() const { return privkey; }
+
+    void set_active_sns(pubkey_set pubkeys);
+    void update_active_sns(pubkey_set added, pubkey_set removed);
 
     /**
      * Batches a set of jobs to be executed by workers, optionally followed by a completion function.
@@ -1087,7 +983,7 @@ public:
      * Queues a single job to be executed with no return value.  This is a shortcut for creating and
      * submitting a single-job, no-completion-function batch job.
      */
-    void job(std::function<void()> f);
+    void job(std::function<void()> f, std::optional<TaggedThreadID> = std::nullopt);
 
     /**
      * Adds a timer that gets scheduled periodically in the job queue.  Normally jobs are not
@@ -1096,7 +992,7 @@ public:
      * (so that, under heavy load or long jobs, there can be more than one of the same job scheduled
      * or running at a time) then specify `squelch` as `false`.
      */
-    void add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch = true);
+    void add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch = true, std::optional<TaggedThreadID> = std::nullopt);
 };
 
 /// Helper class that slightly simplifies adding commands to a category.
@@ -1143,9 +1039,7 @@ struct data_parts_impl {
     data_parts_impl(InputIt begin, InputIt end) : begin{std::move(begin)}, end{std::move(end)} {}
 };
 
-/// Specifies an iterator pair of data options to send, for when the number of arguments to send()
-/// cannot be determined at compile time.
-template <typename InputIt>
+template <typename InputIt, typename = std::enable_if_t<std::is_convertible_v<decltype(*std::declval<InputIt>()), std::string_view>>>
 data_parts_impl<InputIt> data_parts(InputIt begin, InputIt end) { return {std::move(begin), std::move(end)}; }
 
 /// Specifies a connection hint when passed in to send().  If there is no current connection to the
@@ -1176,6 +1070,11 @@ struct incoming {
     explicit incoming(bool inc = true) : is_incoming{inc} {}
 };
 
+struct outgoing {
+  bool is_outgoing = true;
+  explicit outgoing(bool out = true) : is_outgoing{out} {}
+};
+
 /// Specifies the idle timeout for the connection - if a new or existing outgoing connection is used
 /// for the send and its current idle timeout setting is less than this value then it is updated.
 struct keep_alive {
@@ -1183,24 +1082,83 @@ struct keep_alive {
     explicit keep_alive(std::chrono::milliseconds time) : time{std::move(time)} {}
 };
 
+struct request_timeout {
+  std::chrono::milliseconds time;
+  explicit request_timeout(std::chrono::milliseconds time) : time{std::move(time)} {}
+};
+
+struct queue_failure {
+  using callback_t = std::function<void(const zmq::error_t* exc)>;
+  callback_t callback;
+};
+
+struct queue_full {
+  using callback_t = std::function<void()>;
+  callback_t callback;
+};
+
+}
+
+namespace connect_option {
+
+struct ephemeral_routing_id {
+  bool use_ephemeral_routing_id = true;
+  explicit ephemeral_routing_id(bool use = true) : use_ephemeral_routing_id{use} {}
+};
+
+struct timeout {
+  std::chrono::milliseconds time;
+  explicit timeout(std::chrono::milliseconds time) : time{std::move(time)} {}
+};
+
+struct keep_alive {
+  std::chrono::milliseconds time;
+  explicit keep_alive(std::chrono::milliseconds time) : time{std::move(time)} {}
+};
+
+struct hint {
+  std::string address;
+  explicit hint(std::string_view address) : address{address} {}
+};
+
 }
 
 namespace detail {
 
+template <typename T>
+uintptr_t serialize_object(T&& obj) {
+  static_assert(std::is_rvalue_reference<decltype(obj)>::value, "serialize_object must be given an rvalue reference");
+  auto* ptr = new T{std::forward<T>(obj)};
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+template <typename T> T deserialize_object(uintptr_t ptrval) {
+  auto* ptr = reinterpret_cast<T*>(ptrval);
+  T ret{std::move(*ptr)};
+  delete ptr;
+  return ret;
+}
+
 // Sends a control message to the given socket consisting of the command plus optional dict
 // data (only sent if the data is non-empty).
-void send_control(zmq::socket_t& sock, string_view cmd, std::string data = {});
+void send_control(zmq::socket_t& sock, std::string_view cmd, std::string data = {});
 
 /// Base case: takes a string-like value and appends it to the message parts
-inline void apply_send_option(bt_list& parts, bt_dict&, string_view arg) {
+inline void apply_send_option(bt_list& parts, bt_dict&, std::string_view arg) {
     parts.emplace_back(arg);
+}
+
+template <typename T>
+inline void apply_send_option(bt_list& parts, bt_dict& control_data, const std::optional<T>& opt)
+{
+  if (opt) apply_send_option(parts, control_data, *opt);
 }
 
 /// `data_parts` specialization: appends a range of serialized data parts to the parts to send
 template <typename InputIt>
 void apply_send_option(bt_list& parts, bt_dict&, const send_option::data_parts_impl<InputIt> data) {
     for (auto it = data.begin; it != data.end; ++it)
-        parts.push_back(arqmamq::bt_deserialize(*it));
+        parts.emplace_back(*it);
 }
 
 /// `hint` specialization: sets the hint in the control data
@@ -1218,22 +1176,34 @@ inline void apply_send_option(bt_list&, bt_dict& control_data, const send_option
     control_data["incoming"] = i.is_incoming;
 }
 
-/// `keep_alive` specialization: increases the outgoing socket idle timeout (if shorter)
-inline void apply_send_option(bt_list&, bt_dict& control_data, const send_option::keep_alive& timeout) {
-    control_data["keep-alive"] = timeout.time.count();
+inline void apply_send_option(bt_list&, bt_dict& control_data, const send_option::outgoing& o) {
+    control_data["outgoing"] = o.is_outgoing;
 }
 
-} // namespace detail
+/// `keep_alive` specialization: increases the outgoing socket idle timeout (if shorter)
+inline void apply_send_option(bt_list&, bt_dict& control_data, const send_option::keep_alive& timeout) {
+    control_data["keep_alive"] = timeout.time.count();
+}
+
+inline void apply_send_option(bt_list&, bt_dict& control_data, const send_option::request_timeout& timeout) {
+  control_data["request_timeout"] = timeout.time.count();
+}
+
+inline void apply_send_option(bt_list&, bt_dict& control_data, send_option::queue_failure f) {
+  control_data["send_fail"] = serialize_object(std::move(f.callback));
+}
+
+inline void apply_send_option(bt_list&, bt_dict& control_data, send_option::queue_full f) {
+  control_data["send_full_q"] = serialize_object(std::move(f.callback));
+}
+
+std::pair<std::string, AuthLevel> extract_metadata(zmq::message_t& msg);
 
 template <typename... T>
-bt_dict build_send(ConnectionID to, string_view cmd, const T&... opts) {
+bt_dict build_send(ConnectionID to, std::string_view cmd, T&&... opts) {
     bt_dict control_data;
     bt_list parts{{cmd}};
-#ifdef __cpp_fold_expressions
-    (detail::apply_send_option(parts, control_data, opts),...);
-#else
-    (void) std::initializer_list<int>{(detail::apply_send_option(parts, control_data, opts), 0)...};
-#endif
+    (detail::apply_send_option(parts, control_data, std::forward<T>(opts)),...);
 
     if (to.sn())
         control_data["conn_pubkey"] = std::move(to.pk);
@@ -1243,30 +1213,108 @@ bt_dict build_send(ConnectionID to, string_view cmd, const T&... opts) {
     }
     control_data["send"] = std::move(parts);
     return control_data;
+}
 
+inline void apply_connect_option(ArqmaMQ& amq, bool remote, bt_dict& opts, const AuthLevel& auth)
+{
+  if (remote) opts["auth_level"] = static_cast<std::underlying_type_t<AuthLevel>>(auth);
+  else amq.log(LogLevel::warn, __FILE__, __LINE__, "AuthLevel ignored for connect_sn(...)");
+}
+inline void apply_connect_option(ArqmaMQ&, bool, bt_dict& opts, const connect_option::ephemeral_routing_id& er)
+{
+  opts["ephemeral_rid"] = er.use_ephemeral_routing_id;
+}
+inline void apply_connect_option(ArqmaMQ& amq, bool remote, bt_dict& opts, const connect_option::timeout& timeout)
+{
+  if (remote) opts["timeout"] = timeout.time.count();
+  else amq.log(LogLevel::warn, __FILE__, __LINE__, "connect_option::timeout ignored for connect_sn(...)");
+}
+inline void apply_connect_option(ArqmaMQ& amq, bool remote, bt_dict& opts, const connect_option::keep_alive& ka)
+{
+  if (!remote) opts["keep_alive"] = ka.time.count();
+  else amq.log(LogLevel::warn, __FILE__, __LINE__, "connect_option::keep_alive ignored for connect_remote(...)");
+}
+inline void apply_connect_option(ArqmaMQ& amq, bool remote, bt_dict& opts, const connect_option::hint& hint)
+{
+  if (!remote) opts["hint"] = hint.address;
+  else amq.log(LogLevel::warn, __FILE__, __LINE__, "connect_option::hint ignored for connect_remote(...)");
+}
+[[deprecated("use arqmamq::connect_option::keep_alive or ::timeout instead")]]
+inline void apply_connect_option(ArqmaMQ&, bool remote, bt_dict& opts, std::chrono::milliseconds time)
+{
+  if (remote) opts["timeout"] = time.count();
+  else opts["keep_alive"] = time.count();
+}
+[[deprecated("use arqmamq::connect_option::hint{hint} instead of a direct string argument")]]
+inline void apply_connect_option(ArqmaMQ& amq, bool remote, bt_dict& opts, std::string_view hint)
+{
+  if (!remote) opts["hint"] = hint;
+  else amq.log(LogLevel::warn, __FILE__, __LINE__, "string argument ignored for connect_remote(...)");
+}
+
+} // namespace detail
+
+template <typename... Option>
+ConnectionID ArqmaMQ::connect_remote(const address& remote, ConnectSuccess on_connect, ConnectFailure on_failure, const Option&... options)
+{
+  bt_dict opts;
+  (detail::apply_connect_option(*this, true, opts, options), ...);
+
+  auto id = next_conn_id++;
+  opts["conn_id"] = id;
+  opts["connect"] = detail::serialize_object(std::move(on_connect));
+  opts["failure"] = detail::serialize_object(std::move(on_failure));
+  if (remote.curve()) opts["pubkey"] = remote.pubkey;
+  opts["remote"] = remote.zmq_address();
+
+  detail::send_control(get_control_socket(), "CONNECT_REMOTE", bt_serialize(opts));
+
+  return id;
+}
+
+template <typename... Option>
+ConnectionID ArqmaMQ::connect_sn(std::string_view pubkey, const Option&... options)
+{
+  bt_dict opts{
+    {"keep_alive", std::chrono::milliseconds{DEFAULT_CONNECT_SN_KEEP_ALIVE}.count()},
+    {"ephemeral_rid", EPHEMERAL_ROUTING_ID},
+  };
+
+  (detail::apply_connect_option(*this, false, opts, options), ...);
+
+  opts["pubkey"] = pubkey;
+
+  detail::send_control(get_control_socket(), "CONNECT_SN", bt_serialize(opts));
+
+  return pubkey;
 }
 
 template <typename... T>
-void ArqmaMQ::send(ConnectionID to, string_view cmd, const T&... opts) {
+void ArqmaMQ::send(ConnectionID to, std::string_view cmd, const T&... opts) {
     detail::send_control(get_control_socket(), "SEND",
-            bt_serialize(build_send(std::move(to), cmd, opts...)));
+            bt_serialize(detail::build_send(std::move(to), cmd, opts...)));
 }
 
 std::string make_random_string(size_t size);
 
 template <typename... T>
-void ArqmaMQ::request(ConnectionID to, string_view cmd, ReplyCallback callback, const T &...opts) {
+void ArqmaMQ::request(ConnectionID to, std::string_view cmd, ReplyCallback callback, const T &...opts) {
     const auto reply_tag = make_random_string(15); // 15 random bytes is lots and should keep us in most stl implementations' small string optimization
-    bt_dict control_data = build_send(std::move(to), cmd, reply_tag, opts...);
+    bt_dict control_data = detail::build_send(std::move(to), cmd, reply_tag, opts...);
     control_data["request"] = true;
-    control_data["request_callback"] = reinterpret_cast<uintptr_t>(new ReplyCallback{std::move(callback)});
-    control_data["request_tag"] = string_view{reply_tag};
+    control_data["request_callback"] = detail::serialize_object(std::move(callback));
+    control_data["request_tag"] = std::string_view{reply_tag};
     detail::send_control(get_control_socket(), "SEND", bt_serialize(std::move(control_data)));
 }
 
 template <typename... Args>
-void Message::send_back(string_view command, Args&&... args) {
+void Message::send_back(std::string_view command, Args&&... args) {
     arqmamq.send(conn, command, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
+}
+template <typename... Args>
+void Message::DeferredSend::back(std::string_view command, Args&&... args) const
+{
+  arqmamq.send(conn, command, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
@@ -1274,25 +1322,40 @@ void Message::send_reply(Args&&... args) {
     assert(!reply_tag.empty());
     arqmamq.send(conn, "REPLY", reply_tag, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
 }
+template <typename... Args>
+void Message::DeferredSend::reply(Args&&... args) const
+{
+  assert(!reply_tag.empty());
+  arqmamq.send(conn, "REPLY", reply_tag, send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
+}
 
-template <typename ReplyCallback, typename... Args>
-void Message::send_request(string_view cmd, ReplyCallback&& callback, Args&&... args) {
-    arqmamq.request(conn, cmd, std::forward<ReplyCallback>(callback),
+template <typename Callback, typename... Args>
+void Message::send_request(std::string_view cmd, Callback&& callback, Args&&... args) {
+    arqmamq.request(conn, cmd, std::forward<Callback>(callback),
             send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
+}
+template <typename Callback, typename... Args>
+void Message::DeferredSend::request(std::string_view cmd, Callback&& callback, Args&&... args) const
+{
+  arqmamq.request(conn, cmd, std::forward<Callback>(callback), send_option::optional{!conn.sn()}, std::forward<Args>(args)...);
+}
+
+constexpr std::string_view LOG_PREFIX{"arqmamq/", 8};
+inline std::string_view trim_log_filenames(std::string_view local_file) {
+  auto chop = local_file.rfind(LOG_PREFIX);
+  if (chop != local_file.npos)
+    local_file.remove_prefix(chop);
+  return local_file;
 }
 
 template <typename... T>
-void ArqmaMQ::log_(LogLevel lvl, const char* file, int line, const T&... stuff) {
+void ArqmaMQ::log(LogLevel lvl, const char* file, int line, const T&... stuff) {
     if (log_level() < lvl)
         return;
 
     std::ostringstream os;
-#ifdef __cpp_fold_expressions
     (os << ... << stuff);
-#else
-    (void) std::initializer_list<int>{(os << stuff, 0)...};
-#endif
-    logger(lvl, file, line, os.str());
+    logger(lvl, trim_log_filenames(file).data(), line, os.str());
 }
 
 std::ostream &operator<<(std::ostream &os, LogLevel lvl);
