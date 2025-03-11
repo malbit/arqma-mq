@@ -42,6 +42,7 @@ option(ARQMAMQ_INSTALL_CPPZMQ "Install cppzmq header with arqmamq/ headers (requ
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 configure_file(arqmamq/version.h.in arqmamq/version.h @ONLY)
+configure_file(libarqmamq.pc.in libarqmamq.pc @ONLY)
 
 add_library(arqmamq
     arqmamq/address.cpp
@@ -153,7 +154,8 @@ if(ARQMAMQ_INSTALL)
   )
 
   install(
-    FILES arqmamq/address.h
+    FILES
+        arqmamq/address.h
         arqmamq/auth.h
         arqmamq/base32z.h
         arqmamq/base64.h
@@ -167,7 +169,7 @@ if(ARQMAMQ_INSTALL)
         arqmamq/message.h
         arqmamq/variant.h
         ${CMAKE_CURRENT_BINARY_DIR}/arqmamq/version.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/arqmamq
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/arqmamq
   )
 
   if(ARQMAMQ_INSTALL_CPPZMQ)
@@ -176,4 +178,9 @@ if(ARQMAMQ_INSTALL)
       DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/arqmamq
     )
   endif()
+
+  install(
+    FILES ${CMAKE_CURRENT_BINARY_DIR}/libarqmamq.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+  )
 endif()
