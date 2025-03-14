@@ -99,6 +99,14 @@ private:
   template <typename R> friend class Batch;
 };
 
+struct TimerID {
+  TimerID() : _id{0} {}
+private:
+  int _id;
+  explicit constexpr TimerID(int id) : _id{id} {}
+  friend class ArqmaMQ;
+};
+
 /**
  * Class that handles ArqmaMQ listeners, connections, proxying, and workers.  An application
  * typically has just one instance of this class.
@@ -353,6 +361,8 @@ private:
     struct timer_data { std::function<void()> function; bool squelch; bool running; int thread; };
     std::unordered_map<int, timer_data> timer_jobs;
     std::unique_ptr<void, TimersDeleter> timers;
+    std::atomic<int> next_timer_id = 1;
+    std::unordered_map<int, int> timer_zmq_id;
 public:
     // This needs to be public because we have to be able to call it from a plain C function.
     // Nothing external may call it!
@@ -493,7 +503,9 @@ private:
     void proxy_timer(bt_list_consumer timer_data);
 
     /// Same, but deserialized
-    void proxy_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch, int thread);
+    void proxy_timer(int timer_id, std::function<void()> job, std::chrono::milliseconds interval, bool squelch, int thread);
+
+    void proxy_timer_del(int timer_id);
 
     /// ZAP (https://rfc.zeromq.org/spec:27/ZAP/) authentication handler; this does non-blocking
     /// processing of any waiting authentication requests for new incoming connections.
@@ -992,7 +1004,11 @@ public:
      * (so that, under heavy load or long jobs, there can be more than one of the same job scheduled
      * or running at a time) then specify `squelch` as `false`.
      */
-    void add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch = true, std::optional<TaggedThreadID> = std::nullopt);
+    TimerID add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch = true, std::optional<TaggedThreadID> = std::nullopt);
+
+    void add_timer(TimerID& timer, std::function<void()> job, std::chrono::milliseconds interval, bool squelch = true, std::optional<TaggedThreadID> = std::nullopt);
+
+    void cancel_timer(TimerID timer);
 };
 
 /// Helper class that slightly simplifies adding commands to a category.

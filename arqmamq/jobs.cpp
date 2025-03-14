@@ -53,27 +53,29 @@ void ArqmaMQ::proxy_run_batch_jobs(std::queue<batch_job>& jobs, const int reserv
 
 // Called either within the proxy thread, or before the proxy thread has been created; actually adds
 // the timer.  If the timer object hasn't been set up yet it gets set up here.
-void ArqmaMQ::proxy_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch, int thread) {
+void ArqmaMQ::proxy_timer(int it, std::function<void()> job, std::chrono::milliseconds interval, bool squelch, int thread) {
     if (!timers)
         timers.reset(zmq_timers_new());
 
-    int timer_id = zmq_timers_add(timers.get(),
+    int zmq_timer_id = zmq_timers_add(timers.get(),
             interval.count(),
             [](int timer_id, void* self) { static_cast<ArqmaMQ*>(self)->_queue_timer_job(timer_id); },
             this);
-    if (timer_id == -1)
+    if (zmq_timer_id == -1)
         throw zmq::error_t{};
-    timer_jobs[timer_id] = { std::move(job), squelch, false, thread };
+    timer_jobs[zmq_timer_id] = { std::move(job), squelch, false, thread };
+    timer_zmq_id[id] = zmq_timer_id;
 }
 
 void ArqmaMQ::proxy_timer(bt_list_consumer timer_data) {
+    auto timer_id = timer_data.consume_integer<int>();
     std::unique_ptr<std::function<void()>> func{reinterpret_cast<std::function<void()>*>(timer_data.consume_integer<uintptr_t>())};
     auto interval = std::chrono::milliseconds{timer_data.consume_integer<uint64_t>()};
     auto squelch = timer_data.consume_integer<bool>();
     auto thread = timer_data.consume_integer<int>();
     if (!timer_data.is_finished())
         throw std::runtime_error("Internal error: proxied timer request contains unexpected data");
-    proxy_timer(std::move(*func), interval, squelch, thread);
+    proxy_timer(timer_id, std::move(*func), interval, squelch, thread);
 }
 
 void ArqmaMQ::_queue_timer_job(int timer_id) {
@@ -116,16 +118,48 @@ void ArqmaMQ::_queue_timer_job(int timer_id) {
     queue.emplace(static_cast<detail::Batch*>(b), 0);
 }
 
-void ArqmaMQ::add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch, std::optional<TaggedThreadID> thread) {
+void ArqmaMQ::add_timer(TimerID& timer, std::function<void()> job, std::chrono::milliseconds interval, bool squelch, std::optional<TaggedThreadID> thread) {
     int th_id = thread ? thread->_id : 0;
+    timer._id = next_timer_id++;
     if (proxy_thread.joinable()) {
         detail::send_control(get_control_socket(), "TIMER", bt_serialize(bt_list{{
+                    timer._id,
                     detail::serialize_object(std::move(job)),
                     interval.count(),
                     squelch, th_id}}));
     } else {
-        proxy_timer(std::move(job), interval, squelch, th_id);
+        proxy_timer(timer._id, std::move(job), interval, squelch, th_id);
     }
+}
+
+TimerID ArmqaMQ::add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch, std::optional<TaggedThreadID> thread)
+{
+  TimerID tid;
+  add_timer(tid, std::move(job), interval, squelch, std::move(thread));
+  return tid;
+}
+
+void ArqmaMQ::proxy_timer_del(int id)
+{
+  if (!timers)
+    return;
+  auto it = timer_zmq_id.find(id);
+  if (it == timer_zmq_id.end())
+    return;
+  zmq_timers_cancel(timers.get(), it->second);
+  timer_zmq_id.erase(it);
+}
+
+void ArqmaMQ::cancel_timer(TimerID timer_id)
+{
+  if (proxy_thread.joinable())
+  {
+    detail::send_control(get_control_socket(), "TIMER_DEL", bt_serialize(timer_id._id));
+  }
+  else
+  {
+    proxy_timer_del(timer_id._id);
+  }
 }
 
 void ArqmaMQ::TimersDeleter::operator()(void* timers) { zmq_timers_destroy(&timers); }

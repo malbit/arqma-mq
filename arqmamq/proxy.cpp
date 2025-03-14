@@ -282,6 +282,8 @@ void ArqmaMQ::proxy_control_message(std::vector<zmq::message_t>& parts) {
             return proxy_disconnect(data);
         } else if (cmd == "TIMER") {
             return proxy_timer(data);
+        } else if (cmd == "TIMER_DEL") {
+            return proxy_timer_del(bt_deserialize<int>(data));
         }
     } else if (parts.size() == 2) {
         if (cmd == "START") {
