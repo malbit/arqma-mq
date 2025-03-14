@@ -53,7 +53,7 @@ void ArqmaMQ::proxy_run_batch_jobs(std::queue<batch_job>& jobs, const int reserv
 
 // Called either within the proxy thread, or before the proxy thread has been created; actually adds
 // the timer.  If the timer object hasn't been set up yet it gets set up here.
-void ArqmaMQ::proxy_timer(int it, std::function<void()> job, std::chrono::milliseconds interval, bool squelch, int thread) {
+void ArqmaMQ::proxy_timer(int id, std::function<void()> job, std::chrono::milliseconds interval, bool squelch, int thread) {
     if (!timers)
         timers.reset(zmq_timers_new());
 
@@ -132,7 +132,7 @@ void ArqmaMQ::add_timer(TimerID& timer, std::function<void()> job, std::chrono::
     }
 }
 
-TimerID ArmqaMQ::add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch, std::optional<TaggedThreadID> thread)
+TimerID ArqmaMQ::add_timer(std::function<void()> job, std::chrono::milliseconds interval, bool squelch, std::optional<TaggedThreadID> thread)
 {
   TimerID tid;
   add_timer(tid, std::move(job), interval, squelch, std::move(thread));
